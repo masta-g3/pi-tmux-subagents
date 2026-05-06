@@ -60,4 +60,4 @@ State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/tmux-subag
 
 ## pi-sessions compatibility
 
-The extension is standalone. When launched from a managed `pi-sessions` parent with explicit `PI_SESSIONS_DIR` and `PI_SESSIONS_SESSION_ID`, it mirrors child rows into the existing `pi-sessions` registry and writes dashboard-compatible heartbeats. Without those env vars, no `pi-sessions` state is created or required.
+The extension is standalone. When launched from a managed [`pi-sessions`](https://github.com/masta-g3/pi-sessions) parent with explicit `PI_SESSIONS_DIR` and `PI_SESSIONS_SESSION_ID`, it mirrors child rows into the existing `pi-sessions` registry and writes dashboard-compatible heartbeats. Without those env vars, no `pi-sessions` state is created or required.
