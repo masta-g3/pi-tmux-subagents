@@ -25,8 +25,9 @@ Optional `pi-sessions` mirror rows use the child ID and tmux session name, rende
 
 ## Layout
 
+- `agents/` — packaged built-in agents (`scout`, `worker`, `delegate`) loaded at lowest priority.
 - `src/index.ts` — Pi extension entry point and `tmux_subagent` tool.
-- `src/agents.ts` — Markdown frontmatter discovery for user/project agents.
+- `src/agents.ts` — Markdown frontmatter discovery for built-in, user, and project agents.
 - `src/paths.ts` — state, job, and agent directory path helpers.
 - `src/state.ts` — `jobs.json`, per-job metadata, and lock-protected mutation helpers.
 - `src/prompt.ts` — child boundary prompt, task contract, Pi CLI argument builder.

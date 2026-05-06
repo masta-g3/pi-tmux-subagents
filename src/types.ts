@@ -1,5 +1,5 @@
 export type AgentScope = "user" | "project" | "both";
-export type AgentSource = "user" | "project";
+export type AgentSource = "builtin" | "user" | "project";
 export type SystemPromptMode = "replace" | "append";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type AgentTools = "all" | "builtins" | "none" | string[];

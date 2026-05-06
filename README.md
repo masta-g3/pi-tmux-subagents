@@ -15,13 +15,19 @@ Restart any already-running parent Pi sessions after rebuilding or installing; P
 
 ## Agent files
 
+The package ships with three built-in agents:
+
+- `scout` — fast read-only codebase recon, pinned to `openai-codex/gpt-5.4-mini`.
+- `worker` — focused implementation agent, pinned to `openai-codex/gpt-5.5`.
+- `delegate` — lightweight general helper that inherits the parent model.
+
 User agents are discovered from:
 
 ```text
 ~/.pi/agent/agents/*.md
 ```
 
-Project agents are opt-in via `agentScope: "project"` or `"both"` and are discovered from the nearest:
+User/project agents with the same name override built-ins. Project agents are opt-in via `agentScope: "project"` or `"both"` and are discovered from the nearest:
 
 ```text
 .pi/agents/*.md

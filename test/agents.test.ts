@@ -38,6 +38,30 @@ test("parseAgentMarkdown skips malformed and disabled agents", () => {
   assert.equal(parseAgentMarkdown("---\nname: off\ndescription: Off\ndisabled: true\n---\nBody", "/tmp/b.md", "user"), null);
 });
 
+test("discoverAgents includes builtins and lets user agents override them", async () => {
+  const home = tempDir();
+  const userAgents = join(home, ".pi", "agent", "agents");
+  await mkdir(userAgents, { recursive: true });
+  await writeFile(join(userAgents, "scout.md"), "---\nname: scout\ndescription: custom scout\n---\nCustom", "utf8");
+
+  const previousHome = process.env.HOME;
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = home;
+  delete process.env.PI_CODING_AGENT_DIR;
+  try {
+    const agents = discoverAgents(home, "user").agents;
+    assert.equal(agents.find((agent) => agent.name === "delegate")?.source, "builtin");
+    assert.equal(agents.find((agent) => agent.name === "worker")?.model, "openai-codex/gpt-5.5");
+    assert.equal(agents.find((agent) => agent.name === "scout")?.description, "custom scout");
+    assert.equal(agents.find((agent) => agent.name === "scout")?.source, "user");
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
+  }
+});
+
 test("discoverAgents defaults to user scope and lets project override in both scope", async () => {
   const home = tempDir();
   const project = tempDir();
@@ -49,15 +73,19 @@ test("discoverAgents defaults to user scope and lets project override in both sc
   await writeFile(join(projectAgents, "same.md"), "---\nname: same\ndescription: project\n---\nProject", "utf8");
 
   const previousHome = process.env.HOME;
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
   process.env.HOME = home;
+  delete process.env.PI_CODING_AGENT_DIR;
   try {
-    assert.equal(discoverAgents(project, "user").agents[0]?.description, "user");
+    assert.equal(discoverAgents(project, "user").agents.find((agent) => agent.name === "same")?.description, "user");
     const both = discoverAgents(project, "both").agents;
-    assert.equal(both.length, 1);
-    assert.equal(both[0]?.description, "project");
-    assert.equal(both[0]?.source, "project");
+    assert.equal(both.find((agent) => agent.name === "same")?.description, "project");
+    assert.equal(both.find((agent) => agent.name === "same")?.source, "project");
+    assert.equal(both.find((agent) => agent.name === "worker")?.source, "builtin");
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
   }
 });

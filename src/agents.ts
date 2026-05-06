@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { findProjectAgentsDir, userAgentsDir } from "./paths.js";
 import type { AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource, AgentTools, SystemPromptMode, ThinkingLevel } from "./types.js";
 
@@ -69,6 +70,10 @@ export function parseAgentMarkdown(content: string, filePath: string, source: Ag
   };
 }
 
+function builtinAgentsDir(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "agents");
+}
+
 function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
   if (!existsSync(dir)) return [];
   const agents: AgentConfig[] = [];
@@ -83,10 +88,12 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 
 export function discoverAgents(cwd: string, scope: AgentScope = "user"): AgentDiscoveryResult {
   const projectAgentsDir = findProjectAgentsDir(cwd);
+  const builtinAgents = loadAgentsFromDir(builtinAgentsDir(), "builtin");
   const userAgents = scope === "project" ? [] : loadAgentsFromDir(userAgentsDir(), "user");
   const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
   const byName = new Map<string, AgentConfig>();
 
+  for (const agent of builtinAgents) byName.set(agent.name, agent);
   if (scope === "both") {
     for (const agent of userAgents) byName.set(agent.name, agent);
     for (const agent of projectAgents) byName.set(agent.name, agent);
