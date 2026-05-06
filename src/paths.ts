@@ -1,0 +1,67 @@
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+
+export function codingAgentDir(): string {
+  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+}
+
+export function stateRoot(): string {
+  return process.env.PI_TMUX_SUBAGENTS_DIR ?? join(codingAgentDir(), "tmux-subagents");
+}
+
+export function jobsPath(root = stateRoot()): string {
+  return join(root, "jobs.json");
+}
+
+export function jobDir(root: string, id: string): string {
+  return join(root, "jobs", id);
+}
+
+export function heartbeatPath(root: string, id: string): string {
+  return join(jobDir(root, id), "heartbeat.json");
+}
+
+export function metadataPath(root: string, id: string): string {
+  return join(jobDir(root, id), "metadata.json");
+}
+
+export function resultPath(root: string, id: string): string {
+  return join(jobDir(root, id), "result.md");
+}
+
+export function agentSystemPath(root: string, id: string): string {
+  return join(jobDir(root, id), "agent-system.md");
+}
+
+export function taskPath(root: string, id: string): string {
+  return join(jobDir(root, id), "task.md");
+}
+
+export function userAgentsDir(): string {
+  return join(codingAgentDir(), "agents");
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+export function findProjectAgentsDir(cwd: string): string | null {
+  let current = resolve(cwd);
+  while (true) {
+    const candidate = join(current, ".pi", "agents");
+    if (isDirectory(candidate)) return candidate;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+export function explicitPiSessionsDir(): string | undefined {
+  const dir = process.env.PI_SESSIONS_DIR;
+  return dir && existsSync(dir) ? dir : undefined;
+}

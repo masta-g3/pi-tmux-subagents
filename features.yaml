@@ -1,0 +1,10 @@
+- id: tmux-subagents-001
+  status: done
+  description: Create a minimal tmux-native Pi subagent extension with optional pi-sessions
+    dashboard nesting
+  priority: 2
+  depends_on: []
+  created_at: '2026-05-03'
+  completed_at: '2026-05-05'
+  epic: tmux-subagents
+  plan_file: docs/history/20260505_tmux-subagents-001_tmux_subagents.md
