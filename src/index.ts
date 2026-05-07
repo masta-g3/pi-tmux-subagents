@@ -1,9 +1,10 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
+import { formatStatus } from "./format.js";
 import { stateRoot } from "./paths.js";
 import { cancelSubagent, getSubagentStatus, launchSubagent, waitForSubagent } from "./run.js";
 import { loadJobs } from "./state.js";
-import type { AgentScope, SubagentStatusResult } from "./types.js";
+import type { AgentScope } from "./types.js";
 
 type ToolParams = {
   action?: "list" | "get" | "status" | "cancel" | "stop";
@@ -43,20 +44,6 @@ const TmuxSubagentParams = {
 
 function text(content: string, details?: unknown, isError?: boolean) {
   return { content: [{ type: "text" as const, text: content }], details, isError };
-}
-
-function formatStatus(status: SubagentStatusResult): string {
-  const lines = [
-    `Job: ${status.job.id}`,
-    `Agent: ${status.job.agentName}`,
-    `Status: ${status.status}`,
-    `tmux: ${status.job.tmuxSession}`,
-    `Result: ${status.job.resultPath}`,
-  ];
-  lines.push(`Stop when done: tmux_subagent({ action: "stop", childId: "${status.job.id}" })`);
-  if (status.result?.trim()) lines.push("", status.result.trim());
-  else if (status.preview?.trim()) lines.push("", "Pane preview:", status.preview.trim());
-  return lines.join("\n");
 }
 
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {

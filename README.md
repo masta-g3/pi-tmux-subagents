@@ -62,6 +62,19 @@ tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 
 Child sessions stay alive after completing so the parent can inspect or follow up. Use `action: "stop"` when no follow-up is needed.
 
+Foreground runs and explicit status calls render a compact parent-session summary:
+
+```text
+tmux subagent scout
+ ✓ scout · done · 2m39s
+   ⎿  Done
+      <result preview>
+   tmux: pi-sessions-abc123
+   attach: tmux attach-session -t pi-sessions-abc123
+   output: /path/to/result.md
+   stop: tmux_subagent({ action: "stop", childId: "..." })
+```
+
 State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/tmux-subagents` when unset.
 
 ## pi-sessions compatibility
