@@ -42,6 +42,20 @@ test("formatStatus renders compact done summary with attach and output paths", (
   assert.match(output, /   stop: tmux_subagent\({ action: "stop", childId: "child-123" }\)/);
 });
 
+test("formatStatus shows auto-stopped completion without manual stop hint", () => {
+  const output = formatStatus(status({ autoStopped: true }));
+
+  assert.match(output, /   auto-stopped after completion/);
+  assert.doesNotMatch(output, /tmux_subagent\({ action: "stop"/);
+});
+
+test("formatStatus shows auto-stop failure with manual stop hint", () => {
+  const output = formatStatus(status({ autoStopError: "tmux session disappeared" }));
+
+  assert.match(output, /   auto-stop failed: tmux session disappeared/);
+  assert.match(output, /   stop: tmux_subagent\({ action: "stop", childId: "child-123" }\)/);
+});
+
 test("formatStatus prefers result and truncates long snippets", () => {
   const output = formatStatus(status({
     result: Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n"),

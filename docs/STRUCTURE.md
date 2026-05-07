@@ -19,7 +19,7 @@ Standalone state is the source of truth. Optional `pi-sessions` compatibility is
 
 ## Lifecycle
 
-Child Pi sessions stay alive after the assigned task completes so the parent can inspect, attach, or ask follow-up questions. Completion is represented as `waiting` after the child has been `running`; use `tmux_subagent({ action: "stop", childId })` when no follow-up is needed. `cancel` remains as a compatibility alias for the same shutdown behavior.
+Child Pi sessions stay alive after the assigned task completes so the parent can inspect, attach, or ask follow-up questions. Completion is represented as `waiting` after the child has been `running`; use `tmux_subagent({ action: "stop", childId })` when no follow-up is needed. For disposable calls, the parent can pass `autoStopOnComplete: true`; foreground runs stop after clean completion, and background runs stop when a later `status` call observes clean completion. Failed/interrupted sessions stay alive for inspection. `cancel` remains as a compatibility alias for the same shutdown behavior.
 
 Optional `pi-sessions` mirror rows use the child ID and tmux session name, render under their parent, and keep the left-column label short (`agentName` only). `taskPreview` belongs in metadata/details/filtering, not in the row title.
 

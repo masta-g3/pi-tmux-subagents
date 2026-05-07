@@ -12,6 +12,13 @@ test("tmux_subagent exposes stop as a shutdown alias", () => {
   assert.ok(tool.parameters.properties.action.enum.includes("stop"));
 });
 
+test("tmux_subagent exposes runtime auto-stop option", () => {
+  let tool: any;
+  extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+  assert.equal(tool.parameters.properties.autoStopOnComplete.type, "boolean");
+});
+
 test("tmux_subagent rejects recursive launches past agent maxDepth", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-test-"));
   const agentDir = join(root, "agent", "agents");

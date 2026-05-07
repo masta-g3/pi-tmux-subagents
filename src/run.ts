@@ -16,6 +16,7 @@ export interface LaunchSubagentInput {
   agent: AgentConfig;
   task: string;
   background: boolean;
+  autoStopOnComplete?: boolean;
   tmux?: TmuxExecutor;
 }
 
@@ -79,6 +80,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     resultPath: resultPath(root, id),
     createdAt: now,
     updatedAt: now,
+    autoStopOnComplete: input.autoStopOnComplete || undefined,
   };
 
   const promptFiles = await writePromptFiles(root, job, input.agent, input.task);
@@ -152,6 +154,20 @@ export async function cancelSubagent(
   const updated = await updateJob(root, job.id, (existing) => ({ ...existing, status: "stopped", updatedAt: Date.now() }));
   await updateMirroredJobStatus(updated, "stopped");
   return updated;
+}
+
+export async function autoStopCompletedSubagent(
+  root: string,
+  status: SubagentStatusResult,
+  tmux: TmuxExecutor = execTmux,
+): Promise<SubagentStatusResult> {
+  if (status.status !== "waiting") return status;
+  try {
+    const stopped = await cancelSubagent(root, status.job.id, tmux);
+    return { ...status, job: stopped, autoStopped: true };
+  } catch (error) {
+    return { ...status, autoStopError: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function sleep(ms: number): Promise<void> {

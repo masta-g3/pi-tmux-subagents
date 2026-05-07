@@ -40,6 +40,7 @@ export interface TmuxSubagentJob {
   createdAt: number;
   updatedAt: number;
   error?: string;
+  autoStopOnComplete?: boolean;
 }
 
 export interface TmuxSubagentsRegistry {
@@ -63,4 +64,6 @@ export interface SubagentStatusResult {
   heartbeat?: TmuxSubagentHeartbeat;
   result?: string;
   preview?: string;
+  autoStopped?: boolean;
+  autoStopError?: string;
 }

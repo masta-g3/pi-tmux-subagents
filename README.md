@@ -56,11 +56,12 @@ You are a focused scouting agent. Report findings clearly and stop.
 tmux_subagent({ action: "list" })
 tmux_subagent({ action: "get", agent: "scout" })
 tmux_subagent({ agent: "scout", task: "Inspect auth flow", background: true })
+tmux_subagent({ agent: "code-critic", task: "Review these files", autoStopOnComplete: true })
 tmux_subagent({ action: "status", childId: "abc123" })
 tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 ```
 
-Child sessions stay alive after completing so the parent can inspect or follow up. Use `action: "stop"` when no follow-up is needed.
+Child sessions stay alive after completing so the parent can inspect or follow up. Use `action: "stop"` when no follow-up is needed, or pass `autoStopOnComplete: true` for disposable runs. Auto-stop only applies after clean completion; failed or interrupted sessions stay alive for inspection. Background jobs auto-stop when a later `status` call observes clean completion.
 
 Foreground runs and explicit status calls render a compact parent-session summary:
 

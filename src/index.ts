@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
 import { formatStatus } from "./format.js";
 import { stateRoot } from "./paths.js";
-import { cancelSubagent, getSubagentStatus, launchSubagent, waitForSubagent } from "./run.js";
+import { autoStopCompletedSubagent, cancelSubagent, getSubagentStatus, launchSubagent, waitForSubagent } from "./run.js";
 import { loadJobs } from "./state.js";
 import type { AgentScope } from "./types.js";
 
@@ -15,6 +15,7 @@ type ToolParams = {
   id?: string;
   agentScope?: AgentScope;
   cwd?: string;
+  autoStopOnComplete?: boolean;
 };
 
 type PiContext = { cwd: string; ui?: { setStatus?: (key: string, text: string | undefined) => void } };
@@ -38,7 +39,8 @@ const TmuxSubagentParams = {
     childId: { type: "string", description: "Child job ID or unique prefix for status/cancel." },
     id: { type: "string", description: "Alias for childId." },
     agentScope: { type: "string", enum: ["user", "project", "both"], description: "Agent discovery scope. Default user." },
-    cwd: { type: "string", description: "Working directory for the child. Defaults to parent cwd." }
+    cwd: { type: "string", description: "Working directory for the child. Defaults to parent cwd." },
+    autoStopOnComplete: { type: "boolean", description: "Stop the tmux session automatically after a clean completion. Default false; failures and attention-needed sessions stay alive." }
   }
 } as const;
 
@@ -98,7 +100,8 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           const jobs = await loadJobs(root);
           return text(jobs.jobs.map((job) => `${job.id.slice(0, 12)} ${job.status} ${job.agentName}: ${job.taskPreview}`).join("\n") || "No tmux subagent jobs.", jobs);
         }
-        const status = await getSubagentStatus(root, id);
+        const initialStatus = await getSubagentStatus(root, id);
+        const status = initialStatus.job.autoStopOnComplete ? await autoStopCompletedSubagent(root, initialStatus) : initialStatus;
         activeJobs.set(status.job.id, { agentName: status.job.agentName, status: status.status });
         refreshParentStatus();
         return text(formatStatus(status), status);
@@ -119,7 +122,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       const currentDepth = Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;
       if (currentDepth > agent.maxDepth) return text(`Agent ${agent.name} cannot launch at subagent depth ${currentDepth}; maxDepth is ${agent.maxDepth}.`, undefined, true);
 
-      const job = await launchSubagent({ stateRoot: root, cwd, agent, task: params.task, background: params.background ?? false });
+      const job = await launchSubagent({ stateRoot: root, cwd, agent, task: params.task, background: params.background ?? false, autoStopOnComplete: params.autoStopOnComplete });
       activeJobs.set(job.id, { agentName: job.agentName, status: job.status });
       refreshParentStatus();
       if (params.background) {
@@ -128,11 +131,11 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           `tmux: ${job.tmuxSession}`,
           `Result: ${job.resultPath}`,
           `Attach: tmux attach-session -t ${job.tmuxSession}`,
-          `Stop when done: tmux_subagent({ action: "stop", childId: "${job.id}" })`,
+          params.autoStopOnComplete ? "Auto-stop: enabled when status observes clean completion" : `Stop when done: tmux_subagent({ action: "stop", childId: "${job.id}" })`,
         ].join("\n"), job);
       }
 
-      const final = await waitForSubagent(root, job.id, undefined, {
+      const waited = await waitForSubagent(root, job.id, undefined, {
         signal,
         onUpdate: onUpdate ? (status) => {
           activeJobs.set(status.job.id, { agentName: status.job.agentName, status: status.status });
@@ -140,6 +143,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           onUpdate(text(formatStatus(status), status));
         } : undefined,
       });
+      const final = params.autoStopOnComplete ? await autoStopCompletedSubagent(root, waited) : waited;
       activeJobs.set(final.job.id, { agentName: final.job.agentName, status: final.status });
       refreshParentStatus();
       return text(formatStatus(final), final, final.status === "error");
