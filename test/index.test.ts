@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import extension from "../src/index.js";
+import extension, { resolveAutoStopOnComplete } from "../src/index.js";
 
 test("tmux_subagent exposes stop as a shutdown alias", () => {
   let tool: any;
@@ -12,11 +12,16 @@ test("tmux_subagent exposes stop as a shutdown alias", () => {
   assert.ok(tool.parameters.properties.action.enum.includes("stop"));
 });
 
-test("tmux_subagent exposes runtime auto-stop option", () => {
+test("tmux_subagent exposes runtime auto-stop option enabled by default", () => {
   let tool: any;
   extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
 
   assert.equal(tool.parameters.properties.autoStopOnComplete.type, "boolean");
+  assert.equal(tool.parameters.properties.autoStopOnComplete.default, true);
+  assert.match(tool.parameters.properties.autoStopOnComplete.description, /Default true/);
+  assert.equal(resolveAutoStopOnComplete(undefined), true);
+  assert.equal(resolveAutoStopOnComplete(true), true);
+  assert.equal(resolveAutoStopOnComplete(false), false);
 });
 
 test("tmux_subagent rejects recursive launches past agent maxDepth", async () => {

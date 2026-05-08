@@ -40,12 +40,16 @@ const TmuxSubagentParams = {
     id: { type: "string", description: "Alias for childId." },
     agentScope: { type: "string", enum: ["user", "project", "both"], description: "Agent discovery scope. Default user." },
     cwd: { type: "string", description: "Working directory for the child. Defaults to parent cwd." },
-    autoStopOnComplete: { type: "boolean", description: "Stop the tmux session automatically after a clean completion. Default false; failures and attention-needed sessions stay alive." }
+    autoStopOnComplete: { type: "boolean", default: true, description: "Stop the tmux session automatically after a clean completion. Default true; set false to keep sessions alive for follow-up. Failures and attention-needed sessions stay alive." }
   }
 } as const;
 
 function text(content: string, details?: unknown, isError?: boolean) {
   return { content: [{ type: "text" as const, text: content }], details, isError };
+}
+
+export function resolveAutoStopOnComplete(value: boolean | undefined): boolean {
+  return value ?? true;
 }
 
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
@@ -62,7 +66,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "tmux_subagent",
     label: "tmux subagent",
-    description: "Launch and manage Markdown-defined subagents as real tmux-backed Pi sessions. Child sessions stay alive after completion for follow-up; call action stop with childId when no longer needed.",
+    description: "Launch and manage Markdown-defined subagents as real tmux-backed Pi sessions. Child sessions auto-stop after clean completion by default; set autoStopOnComplete false to keep one alive for follow-up.",
     parameters: TmuxSubagentParams,
     async execute(_toolCallId: string, params: ToolParams, signal?: AbortSignal, onUpdate?: (result: any) => void, ctx?: PiContext) {
       const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
@@ -122,7 +126,8 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       const currentDepth = Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;
       if (currentDepth > agent.maxDepth) return text(`Agent ${agent.name} cannot launch at subagent depth ${currentDepth}; maxDepth is ${agent.maxDepth}.`, undefined, true);
 
-      const job = await launchSubagent({ stateRoot: root, cwd, agent, task: params.task, background: params.background ?? false, autoStopOnComplete: params.autoStopOnComplete });
+      const autoStopOnComplete = resolveAutoStopOnComplete(params.autoStopOnComplete);
+      const job = await launchSubagent({ stateRoot: root, cwd, agent, task: params.task, background: params.background ?? false, autoStopOnComplete });
       activeJobs.set(job.id, { agentName: job.agentName, status: job.status });
       refreshParentStatus();
       if (params.background) {
@@ -131,7 +136,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           `tmux: ${job.tmuxSession}`,
           `Result: ${job.resultPath}`,
           `Attach: tmux attach-session -t ${job.tmuxSession}`,
-          params.autoStopOnComplete ? "Auto-stop: enabled when status observes clean completion" : `Stop when done: tmux_subagent({ action: "stop", childId: "${job.id}" })`,
+          autoStopOnComplete ? "Auto-stop: enabled when status observes clean completion" : `Stop when done: tmux_subagent({ action: "stop", childId: "${job.id}" })`,
         ].join("\n"), job);
       }
 
@@ -143,7 +148,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           onUpdate(text(formatStatus(status), status));
         } : undefined,
       });
-      const final = params.autoStopOnComplete ? await autoStopCompletedSubagent(root, waited) : waited;
+      const final = autoStopOnComplete ? await autoStopCompletedSubagent(root, waited) : waited;
       activeJobs.set(final.job.id, { agentName: final.job.agentName, status: final.status });
       refreshParentStatus();
       return text(formatStatus(final), final, final.status === "error");
