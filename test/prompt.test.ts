@@ -51,7 +51,9 @@ test("writePromptFiles writes child boundary and task contract under jobs/id", a
   assert.match(await readFile(paths.agentSystemPath, "utf8"), /You are a child subagent/);
   assert.match(await readFile(paths.agentSystemPath, "utf8"), /You scout\./);
   assert.match(await readFile(paths.taskPath, "utf8"), /Inspect auth carefully/);
-  assert.match(await readFile(paths.taskPath, "utf8"), /Before finishing, write your final response to:/);
+  const task = await readFile(paths.taskPath, "utf8");
+  assert.match(task, /Before finishing, write your final response to:/);
+  assert.match(task, /control-plane output, not a project file change/);
 });
 
 test("buildPiArgs maps agent config to Pi CLI args", () => {

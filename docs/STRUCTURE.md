@@ -34,7 +34,7 @@ Optional `pi-sessions` mirror rows use the child ID and tmux session name, rende
 - `src/prompt.ts` — child boundary prompt, task contract, Pi CLI argument builder.
 - `src/run.ts` — tmux launch/status/cancel/foreground wait behavior.
 - `src/tmux.ts` — small tmux command wrapper.
-- `src/child-bootstrap.ts` — child-side heartbeat extension.
+- `src/child-bootstrap.ts` — child-side heartbeat extension; also writes a fallback `result.md` from the final assistant message when the child did not create one explicitly.
 - `src/pi-sessions-adapter.ts` — optional dashboard compatibility detection/mirroring.
 - `test/` — Node test runner tests compiled through TypeScript.
 

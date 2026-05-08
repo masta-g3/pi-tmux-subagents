@@ -5,6 +5,7 @@ import { heartbeatPath } from "./paths.js";
 import type { TmuxSubagentHeartbeat } from "./types.js";
 
 type PiContext = { cwd: string };
+type MessageLike = { role?: string; content?: unknown };
 
 const EXTENSION_KEY = Symbol.for("pi-tmux-subagents.child-bootstrap.loaded");
 type GlobalState = typeof globalThis & { [EXTENSION_KEY]?: true };
@@ -14,6 +15,41 @@ const HEARTBEAT_INTERVAL_MS = 2000;
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function finalAssistantText(messages: MessageLike[] | undefined): string | undefined {
+  let message: MessageLike | undefined;
+  for (let i = (messages?.length ?? 0) - 1; i >= 0; i -= 1) {
+    if (messages?.[i]?.role === "assistant") {
+      message = messages[i];
+      break;
+    }
+  }
+  if (!message) return undefined;
+  if (typeof message.content === "string") return message.content.trim();
+  if (!Array.isArray(message.content)) return undefined;
+  const text = message.content
+    .filter(isTextPart)
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+  return text || undefined;
+}
+
+function isTextPart(part: unknown): part is { type: string; text: string } {
+  return typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string";
+}
+
+async function writeResultIfMissing(messages: MessageLike[] | undefined): Promise<void> {
+  const resultPath = process.env.PI_SUBAGENT_RESULT_PATH;
+  const result = finalAssistantText(messages);
+  if (!resultPath || !result) return;
+  await mkdir(dirname(resultPath), { recursive: true });
+  try {
+    await writeFile(resultPath, `${result}\n`, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
 }
 
 export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
@@ -72,7 +108,15 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     timer = setInterval(() => void heartbeat(currentState, ctx as PiContext), HEARTBEAT_INTERVAL_MS);
   });
   pi.on("agent_start", async (_event, ctx) => heartbeat("running", ctx as PiContext));
-  pi.on("agent_end", async (_event, ctx) => heartbeat("waiting", ctx as PiContext));
+  pi.on("agent_end", async (event, ctx) => {
+    let message: string | undefined;
+    try {
+      await writeResultIfMissing((event as { messages?: MessageLike[] }).messages);
+    } catch (error) {
+      message = `Could not write result.md: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    await heartbeat("waiting", ctx as PiContext, message);
+  });
   pi.on("session_shutdown", async (_event, ctx) => {
     try {
       if (timer) clearInterval(timer);

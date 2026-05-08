@@ -41,6 +41,8 @@ Output:
 
 Before finishing, write your final response to:
 ${job.resultPath}
+
+This result file is subagent control-plane output, not a project file change.
 `;
 }
 
