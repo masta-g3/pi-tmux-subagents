@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
 import { formatStatus } from "./format.js";
+import { renderToolCall, renderToolResult } from "./render.js";
 import { stateRoot } from "./paths.js";
 import { autoStopCompletedSubagent, cancelSubagent, getSubagentStatus, launchSubagent, waitForSubagent } from "./run.js";
 import { loadJobs } from "./state.js";
@@ -68,6 +69,8 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     label: "tmux subagent",
     description: "Launch and manage Markdown-defined subagents as real tmux-backed Pi sessions. Child sessions auto-stop after clean completion by default; set autoStopOnComplete false to keep one alive for follow-up.",
     parameters: TmuxSubagentParams,
+    renderCall: renderToolCall,
+    renderResult: renderToolResult,
     async execute(_toolCallId: string, params: ToolParams, signal?: AbortSignal, onUpdate?: (result: any) => void, ctx?: PiContext) {
       const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
       const scope = params.agentScope ?? "user";

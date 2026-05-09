@@ -24,6 +24,43 @@ test("tmux_subagent exposes runtime auto-stop option enabled by default", () => 
   assert.equal(resolveAutoStopOnComplete(false), false);
 });
 
+test("tmux_subagent renders status with active theme tokens", () => {
+  let tool: any;
+  extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+  const theme = {
+    bold: (text: string) => `<b>${text}</b>`,
+    fg: (token: string, text: string) => `<${token}>${text}</${token}>`,
+  };
+
+  const rendered = tool.renderResult({
+    content: [{ type: "text", text: "plain fallback" }],
+    details: {
+      status: "running",
+      job: {
+        id: "child-123",
+        agentName: "plan-critic",
+        taskPreview: "Review plan",
+        cwd: "/repo",
+        tmuxSession: "pi-sessions-child-123",
+        status: "running",
+        resultPath: "/tmp/result.md",
+        createdAt: 1_000,
+        updatedAt: 2_000,
+      },
+      heartbeat: { jobId: "child-123", cwd: "/repo", state: "running", stateSince: 1_500, updatedAt: 2_000 },
+      preview: "## Scope",
+    },
+  }, { expanded: false, isPartial: true }, theme, {}).render(120).join("\n");
+
+  assert.match(rendered, /^<muted>tmux subagent plan-critic<\/muted>/);
+  assert.match(rendered, /<warning>⟳<\/warning> <toolTitle><b>plan-critic<\/b><\/toolTitle>/);
+  assert.match(rendered, /<muted>Pane preview:<\/muted>/);
+  assert.match(rendered, /<toolOutput>## Scope<\/toolOutput>/);
+  assert.match(rendered, /<dim>tmux:<\/dim> <muted>pi-sessions-child-123<\/muted>/);
+  assert.match(rendered, /<dim>attach:<\/dim> <mdCode>tmux attach-session -t pi-sessions-child-123<\/mdCode>/);
+  assert.match(rendered, /<dim>stop:<\/dim> <mdCode>tmux_subagent/);
+});
+
 test("tmux_subagent rejects recursive launches past agent maxDepth", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-test-"));
   const agentDir = join(root, "agent", "agents");
