@@ -55,7 +55,7 @@ function colorMetadataLine(line: string, theme: ThemeLike): string {
   const label = trimmed.slice(0, colon + 1);
   const value = trimmed.slice(colon + 1).trimStart();
   const separator = trimmed.slice(colon + 1, colon + 1 + trimmed.slice(colon + 1).length - value.length);
-  const valueToken = label === "stop:" || label === "attach:" ? "mdCode" : "muted";
+  const valueToken = label === "output:" || label === "attach:" ? "mdCode" : "muted";
 
   return `${indent}${theme.fg("dim", label)}${separator}${theme.fg(valueToken, value)}`;
 }

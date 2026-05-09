@@ -58,7 +58,8 @@ test("tmux_subagent renders status with active theme tokens", () => {
   assert.match(rendered, /<toolOutput>## Scope<\/toolOutput>/);
   assert.match(rendered, /<dim>tmux:<\/dim> <muted>pi-sessions-child-123<\/muted>/);
   assert.match(rendered, /<dim>attach:<\/dim> <mdCode>tmux attach-session -t pi-sessions-child-123<\/mdCode>/);
-  assert.match(rendered, /<dim>stop:<\/dim> <mdCode>tmux_subagent/);
+  assert.match(rendered, /<dim>output:<\/dim> <mdCode>\/tmp\/result\.md<\/mdCode>/);
+  assert.match(rendered, /<dim>stop:<\/dim> <muted>tmux_subagent/);
 });
 
 test("tmux_subagent rejects recursive launches past agent maxDepth", async () => {
