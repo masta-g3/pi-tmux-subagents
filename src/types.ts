@@ -66,4 +66,5 @@ export interface SubagentStatusResult {
   preview?: string;
   autoStopped?: boolean;
   autoStopError?: string;
+  mirrorCleanupError?: string;
 }

@@ -46,8 +46,10 @@ export function formatStatus(status: SubagentStatusResult): string {
     `   attach: tmux attach-session -t ${status.job.tmuxSession}`,
     `   output: ${status.job.resultPath}`,
   );
-  if (status.autoStopped) lines.push("   auto-stopped after completion");
-  else {
+  if (status.autoStopped) {
+    lines.push("   auto-stopped after completion");
+    if (status.mirrorCleanupError) lines.push(`   pi-sessions cleanup failed: ${status.mirrorCleanupError}`);
+  } else {
     if (status.autoStopError) lines.push(`   auto-stop failed: ${status.autoStopError}`);
     lines.push(`   stop: tmux_subagent({ action: "stop", childId: "${status.job.id}" })`);
   }

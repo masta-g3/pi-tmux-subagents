@@ -75,6 +75,18 @@ export async function updateMirroredJobStatus(job: TmuxSubagentJob, status: stri
   });
 }
 
+export async function removeMirroredJob(job: TmuxSubagentJob): Promise<void> {
+  const sessionsDir = process.env.PI_SESSIONS_DIR;
+  if (!sessionsDir) return;
+  const registryPath = join(sessionsDir, "registry.json");
+  if (!existsSync(registryPath)) return;
+  await withRegistryLock(sessionsDir, async () => {
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as RegistryLike;
+    const sessions = registry.sessions.filter((session) => session.id !== job.id);
+    await writeJsonAtomic(registryPath, { ...registry, sessions });
+  });
+}
+
 function createMirroredRow(job: TmuxSubagentJob, mirror: PiSessionsMirrorContext): ManagedSessionLike {
   const now = Date.now();
   return {

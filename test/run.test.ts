@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { autoStopCompletedSubagent, launchSubagent, getSubagentStatus, cancelSubagent } from "../src/run.js";
@@ -120,6 +120,37 @@ test("autoStopCompletedSubagent stops clean completed jobs and preserves done re
   assert.equal(calls.at(-1)?.[0], "kill-session");
 }));
 
+test("autoStopCompletedSubagent removes mirrored pi-sessions rows after clean completion", async () => withPiSessions(async (sessionsDir) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-mirror-test-"));
+  const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
+  await writeFile(join(sessionsDir, "registry.json"), JSON.stringify({
+    version: 1,
+    sessions: [{ id: "parent-1", title: "parent", cwd: root, group: "default", tmuxSession: "pi-sessions-parent", status: "running", createdAt: 1, updatedAt: 1 }],
+  }), "utf8");
+  process.env.PI_SESSIONS_SESSION_ID = "parent-1";
+
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, autoStopOnComplete: true, tmux });
+  const launchedRegistry = JSON.parse(await readFile(join(sessionsDir, "registry.json"), "utf8"));
+  assert.ok(launchedRegistry.sessions.some((session: { id: string }) => session.id === job.id));
+  const jobDir = join(root, "jobs", job.id);
+  await mkdir(jobDir, { recursive: true });
+  await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
+    jobId: job.id,
+    cwd: root,
+    state: "waiting",
+    stateSince: 2,
+    updatedAt: 3,
+    seenRunning: true
+  }), "utf8");
+  await writeFile(join(jobDir, "result.md"), "done", "utf8");
+
+  const status = await autoStopCompletedSubagent(root, await getSubagentStatus(root, job.id, tmux), tmux);
+  const registry = JSON.parse(await readFile(join(sessionsDir, "registry.json"), "utf8"));
+
+  assert.equal(status.autoStopped, true);
+  assert.deepEqual(registry.sessions.map((session: { id: string }) => session.id), ["parent-1"]);
+}));
+
 test("autoStopCompletedSubagent returns result and warning when stop fails", async () => withNoPiSessions(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-fail-test-"));
   const tmux: TmuxExecutor = async (args) => {
@@ -185,6 +216,22 @@ async function withNoPiSessions(fn: () => Promise<void>): Promise<void> {
   delete process.env.PI_SESSIONS_SESSION_ID;
   try {
     await fn();
+  } finally {
+    if (oldDir === undefined) delete process.env.PI_SESSIONS_DIR;
+    else process.env.PI_SESSIONS_DIR = oldDir;
+    if (oldId === undefined) delete process.env.PI_SESSIONS_SESSION_ID;
+    else process.env.PI_SESSIONS_SESSION_ID = oldId;
+  }
+}
+
+async function withPiSessions(fn: (sessionsDir: string) => Promise<void>): Promise<void> {
+  const oldDir = process.env.PI_SESSIONS_DIR;
+  const oldId = process.env.PI_SESSIONS_SESSION_ID;
+  const sessionsDir = mkdtempSync(join(tmpdir(), "pi-sessions-mirror-test-"));
+  process.env.PI_SESSIONS_DIR = sessionsDir;
+  delete process.env.PI_SESSIONS_SESSION_ID;
+  try {
+    await fn(sessionsDir);
   } finally {
     if (oldDir === undefined) delete process.env.PI_SESSIONS_DIR;
     else process.env.PI_SESSIONS_DIR = oldDir;

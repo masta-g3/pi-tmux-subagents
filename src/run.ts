@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
-import { detectPiSessionsMirror, mirroredTmuxSessionName, mirrorJobToPiSessions, updateMirroredJobStatus } from "./pi-sessions-adapter.js";
+import { detectPiSessionsMirror, mirroredTmuxSessionName, mirrorJobToPiSessions, removeMirroredJob, updateMirroredJobStatus } from "./pi-sessions-adapter.js";
 import { buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
 import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot } from "./paths.js";
 import { resolveJob, updateJob, upsertJob } from "./state.js";
@@ -162,12 +162,19 @@ export async function autoStopCompletedSubagent(
   tmux: TmuxExecutor = execTmux,
 ): Promise<SubagentStatusResult> {
   if (status.status !== "waiting") return status;
+  let stopped: TmuxSubagentJob;
   try {
-    const stopped = await cancelSubagent(root, status.job.id, tmux);
-    return { ...status, job: stopped, autoStopped: true };
+    stopped = await cancelSubagent(root, status.job.id, tmux);
   } catch (error) {
     return { ...status, autoStopError: error instanceof Error ? error.message : String(error) };
   }
+
+  try {
+    await removeMirroredJob(stopped);
+  } catch (error) {
+    return { ...status, job: stopped, autoStopped: true, mirrorCleanupError: error instanceof Error ? error.message : String(error) };
+  }
+  return { ...status, job: stopped, autoStopped: true };
 }
 
 function sleep(ms: number): Promise<void> {
