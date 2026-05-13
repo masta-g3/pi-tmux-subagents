@@ -13,9 +13,10 @@ flowchart TD
   Tmux --> Child[Child Pi process]
   Child --> Bootstrap[child-bootstrap extension]
   Bootstrap --> Heartbeat[jobs/id/heartbeat.json]
+  Bootstrap --> HubHeartbeat[optional pi-agent-hub heartbeat]
 ```
 
-Standalone state is the source of truth under `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset. Optional `pi-agent-hub` mirroring is adapter-based and must not be required for normal operation. The old default `<PI_CODING_AGENT_DIR>/tmux-subagents` is migrated once and replaced with a symlink when possible so live child processes keep writing to the migrated state.
+Standalone state is the source of truth under `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset. `pi-agent-hub` mirroring is optional and adapter-based; normal operation must not require hub state.
 
 ## Lifecycle
 
@@ -30,10 +31,9 @@ Optional `pi-agent-hub` mirror rows use the child ID and tmux session name, rend
 - `src/agents.ts` — Markdown frontmatter discovery for built-in, user, and project agents.
 - `src/format.ts` — compact plain-text parent-session status/progress text for subagent jobs.
 - `src/render.ts` — theme-aware TUI rendering for `tmux_subagent` call/result rows.
-- `src/names.ts` — canonical package/runtime names and legacy names used by migration.
+- `src/names.ts` — canonical package/runtime names.
 - `src/paths.ts` — state, job, and agent directory path helpers.
 - `src/state.ts` — `jobs.json`, per-job metadata, and lock-protected mutation helpers.
-- `src/migration.ts` — one-time default state path and runtime-name migration.
 - `src/prompt.ts` — child boundary prompt, task contract, Pi CLI argument builder.
 - `src/run.ts` — tmux launch/status/cancel/foreground wait behavior.
 - `src/tmux.ts` — small tmux command wrapper.

@@ -4,14 +4,25 @@ Minimal Pi extension for launching Markdown-defined subagents as real tmux-backe
 
 ## Install
 
+Install from npm:
+
 ```bash
-cd /Users/manager/code/agents/pi-tmux-subagents
-npm install
-npm test
-pi install /Users/manager/code/agents/pi-tmux-subagents
+pi install npm:pi-tmux-subagents
 ```
 
-Restart any already-running parent Pi sessions after rebuilding or installing; Pi loads extension code at process start.
+Restart any already-running parent Pi sessions after installing or updating; Pi loads extension code at process start.
+
+Local development install:
+
+```bash
+git clone https://github.com/masta-g3/pi-tmux-subagents.git
+cd pi-tmux-subagents
+npm install
+npm test
+pi install "$PWD"
+```
+
+Re-run `npm run build` after local changes, then restart parent Pi sessions that should use the updated extension.
 
 ## Agent files
 
@@ -77,8 +88,16 @@ tmux subagent scout
    stop: tmux_subagent({ action: "stop", childId: "..." })
 ```
 
-State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset. On first run after upgrading, the old default `<PI_CODING_AGENT_DIR>/tmux-subagents` directory is moved to the new default and replaced with a symlink when possible so already-running children can keep writing heartbeats/results.
+State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset.
 
 ## pi-agent-hub integration
 
 The extension is standalone. When launched from a managed `pi-agent-hub` parent with `PI_AGENT_HUB_DIR` and `PI_AGENT_HUB_SESSION_ID`, it mirrors child rows into the hub registry and writes dashboard-compatible heartbeats. Without those env vars, no hub state is created or required.
+
+## Development
+
+```bash
+npm install
+npm test
+npm publish --dry-run
+```

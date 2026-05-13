@@ -45,14 +45,14 @@ test("tmux_subagent uses canonical parent status key", async () => {
   }
 });
 
-test("tmux_subagent status reads jobs from migrated default root", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-migrate-test-"));
+test("tmux_subagent status reads jobs from canonical default root", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-root-test-"));
   const agentDir = join(root, "agent");
-  const oldState = join(agentDir, "tmux-subagents");
-  mkdirSync(oldState, { recursive: true });
-  writeFileSync(join(oldState, "jobs.json"), `${JSON.stringify({
+  const state = join(agentDir, "pi-tmux-subagents");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
     version: 1,
-    jobs: [{ id: "child-1", agentName: "scout", taskPreview: "Inspect", cwd: root, tmuxSession: "pi-agent-hub-child-1", status: "starting", resultPath: join(oldState, "jobs", "child-1", "result.md"), createdAt: 1, updatedAt: 1 }],
+    jobs: [{ id: "child-1", agentName: "scout", taskPreview: "Inspect", cwd: root, tmuxSession: "pi-agent-hub-child-1", status: "starting", resultPath: join(state, "jobs", "child-1", "result.md"), createdAt: 1, updatedAt: 1 }],
   }, null, 2)}\n`);
 
   const restorePiEnv = isolatePiStateEnv(agentDir);

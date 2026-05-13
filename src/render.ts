@@ -1,4 +1,4 @@
-import { Text } from "@mariozechner/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { formatStatus } from "./format.js";
 import type { SubagentStatusResult, TmuxSubagentStatus } from "./types.js";
 

@@ -3,7 +3,21 @@
   "version": "0.1.0",
   "description": "Minimal tmux-backed Pi subagents",
   "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
   "type": "module",
+  "author": "masta-g3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/masta-g3/pi-tmux-subagents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/masta-g3/pi-tmux-subagents/issues"
+  },
+  "homepage": "https://github.com/masta-g3/pi-tmux-subagents#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
@@ -12,18 +26,22 @@
   "keywords": [
     "pi-package",
     "pi",
+    "pi-coding-agent",
+    "agent",
+    "subagents",
     "tmux",
-    "subagents"
+    "extension",
+    "session-manager",
+    "coding-agent"
   ],
-  "license": "MIT",
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.72.1",
-    "@mariozechner/pi-tui": "^0.72.1",
-    "@types/node": "^25.6.0",
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-tui": "^0.74.0",
+    "@types/node": "^20.19.0",
     "typescript": "^6.0.3"
   },
   "files": [
@@ -35,6 +53,5 @@
     "extensions": [
       "dist/src/index.js"
     ]
-  },
-  "types": "dist/src/index.d.ts"
+  }
 }

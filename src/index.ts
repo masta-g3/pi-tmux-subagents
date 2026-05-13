@@ -1,8 +1,7 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
 import { formatStatus } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
-import { migrateLegacyState } from "./migration.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
 import { autoStopCompletedSubagent, cancelSubagent, getSubagentStatus, launchSubagent, waitForSubagent } from "./run.js";
@@ -56,7 +55,6 @@ export function resolveAutoStopOnComplete(value: boolean | undefined): boolean {
 
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    await migrateLegacyState();
     setStatus = (ctx as PiContext).ui?.setStatus ? (text) => (ctx as PiContext).ui?.setStatus?.(STATUS_KEY, text) : undefined;
     refreshParentStatus();
   });
@@ -76,7 +74,6 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     async execute(_toolCallId: string, params: ToolParams, signal?: AbortSignal, onUpdate?: (result: any) => void, ctx?: PiContext) {
       const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
       const scope = params.agentScope ?? "user";
-      await migrateLegacyState();
       const root = stateRoot();
 
       if (params.action === "list") {

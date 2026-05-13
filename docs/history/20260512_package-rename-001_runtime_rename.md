@@ -4,27 +4,25 @@ Completed: 2026-05-12
 
 ## Summary
 
-Renamed remaining runtime/internal identifiers to the canonical `pi-tmux-subagents` name while preserving existing local state with a one-time migration. The package/tool/env surface remains intentionally small: package name stays `pi-tmux-subagents`, tool name stays `tmux_subagent`, and `PI_TMUX_SUBAGENTS_*` env vars remain unchanged.
+Renamed remaining runtime/internal identifiers to the canonical `pi-tmux-subagents` name. The package/tool/env surface remains intentionally small: package name stays `pi-tmux-subagents`, tool name stays `tmux_subagent`, and `PI_TMUX_SUBAGENTS_*` env vars remain unchanged. Before the first public npm release, pre-publication legacy state migration was removed so v0.1.0 ships without backward-compatibility code for private local state.
 
 ## Implemented
 
-- Added `src/names.ts` for canonical runtime names and migration-only old names.
-- Changed the default state root from `<PI_CODING_AGENT_DIR>/tmux-subagents` to `<PI_CODING_AGENT_DIR>/pi-tmux-subagents`.
+- Added `src/names.ts` for canonical runtime names.
+- Changed the default state root to `<PI_CODING_AGENT_DIR>/pi-tmux-subagents`.
 - Changed parent status key to `pi-tmux-subagents`.
-- Changed new standalone tmux session names from `pi-tmux-subagent-*` to `pi-tmux-subagents-*`.
-- Added `src/migration.ts` to migrate the old default root to the new one, create a best-effort symlink for live child processes, rewrite stored job/result metadata, and safely rename live non-mirrored tmux sessions when possible.
-- Preserved mirrored `pi-agent-hub-*` tmux names and added best-effort mirror row `resultPath` rewrites.
-- Updated README and structure docs with the new default state root and migration behavior.
-- Updated tests and fixtures for canonical naming, migration behavior, tmux lookup failure safety, and process env isolation.
+- Changed standalone tmux session names to `pi-tmux-subagents-*`.
+- Kept mirrored `pi-agent-hub-*` tmux names for dashboard integration.
+- Updated README and structure docs with the canonical default state root.
+- Updated tests and fixtures for canonical naming and process env isolation.
 
-## Review Fixes
+## Public Release Cleanup
 
-- Made tmux migration safer: a broken `tmux` lookup no longer rewrites stored sessions as if the old session were absent.
-- Isolated `PI_CODING_AGENT_DIR`, `PI_TMUX_SUBAGENTS_DIR`, `PI_AGENT_HUB_DIR`, and `PI_AGENT_HUB_SESSION_ID` in extension tests that invoke startup/tool execution.
-- Removed the proposed `AGENTS.md` guidance as unnecessary bloat.
+- Removed pre-publication legacy migration code and tests.
+- Removed migration-only constants and adapter helpers.
+- Kept `PI_TMUX_SUBAGENTS_DIR` as the only state-root override.
 
 ## Verification
 
-- `npm test` passed: 37/37 tests.
-- `npm pack --dry-run` passed.
-- Stale-name grep checks passed, with remaining old names limited to migration constants/tests/docs.
+- `npm test` passed during implementation.
+- `npm pack --dry-run` passed during implementation.
