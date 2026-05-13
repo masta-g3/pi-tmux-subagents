@@ -12,7 +12,7 @@ function makeJob(id: string, root: string): TmuxSubagentJob {
     agentName: "scout",
     taskPreview: "Task",
     cwd: root,
-    tmuxSession: `pi-tmux-subagent-${id}`,
+    tmuxSession: `pi-tmux-subagents-${id}`,
     status: "starting",
     resultPath: join(root, "jobs", id, "result.md"),
     createdAt: 1,

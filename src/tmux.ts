@@ -57,3 +57,7 @@ export async function capturePane(tmux: TmuxExecutor, sessionName: string): Prom
 export async function killSession(tmux: TmuxExecutor, sessionName: string): Promise<void> {
   await tmux(["kill-session", "-t", sessionName]);
 }
+
+export async function renameSession(tmux: TmuxExecutor, oldName: string, newName: string): Promise<void> {
+  await tmux(["rename-session", "-t", oldName, newName]);
+}

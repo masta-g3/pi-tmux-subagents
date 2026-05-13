@@ -33,7 +33,7 @@ test("launchSubagent creates standalone job and tmux session", async () => withN
   const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
 
   assert.equal(job.agentName, "scout");
-  assert.match(job.tmuxSession, /^pi-tmux-subagent-/);
+  assert.match(job.tmuxSession, /^pi-tmux-subagents-/);
   assert.equal((await loadJobs(root)).jobs.length, 1);
   assert.equal(calls[0]?.[0], "new-session");
   assert.match(calls[0]?.at(-1) ?? "", /PI_TMUX_SUBAGENTS_JOB_ID=/);

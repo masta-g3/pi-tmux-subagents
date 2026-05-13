@@ -28,7 +28,7 @@ function job(dir: string): TmuxSubagentJob {
     agentName: "scout",
     taskPreview: "Inspect auth",
     cwd: dir,
-    tmuxSession: "pi-tmux-subagent-child",
+    tmuxSession: "pi-tmux-subagents-child",
     status: "starting",
     resultPath: join(dir, "jobs", "child-1", "result.md"),
     createdAt: 1,

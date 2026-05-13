@@ -7,7 +7,7 @@ import { mkdtempSync } from "node:fs";
 import { discoverAgents, parseAgentMarkdown } from "../src/agents.js";
 
 function tempDir() {
-  return mkdtempSync(join(tmpdir(), "pi-tmux-agents-test-"));
+  return mkdtempSync(join(tmpdir(), "pi-tmux-subagents-test-"));
 }
 
 test("parseAgentMarkdown supports frontmatter defaults", () => {

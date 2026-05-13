@@ -25,3 +25,13 @@
   created_at: '2026-05-06'
   completed_at: '2026-05-06'
   plan_file: docs/history/20260506_pi-001_auto_stop.md
+- id: package-rename-001
+  status: done
+  description: Rename remaining runtime/internal identifiers to the canonical pi-tmux-subagents
+    name, including a migration path for existing state.
+  priority: 2
+  depends_on: []
+  created_at: '2026-05-12'
+  completed_at: '2026-05-12'
+  epic: package-rename
+  plan_file: docs/history/20260512_package-rename-001_runtime_rename.md

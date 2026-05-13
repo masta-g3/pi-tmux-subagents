@@ -77,7 +77,7 @@ tmux subagent scout
    stop: tmux_subagent({ action: "stop", childId: "..." })
 ```
 
-State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/tmux-subagents` when unset.
+State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset. On first run after upgrading, the old default `<PI_CODING_AGENT_DIR>/tmux-subagents` directory is moved to the new default and replaced with a symlink when possible so already-running children can keep writing heartbeats/results.
 
 ## pi-sessions compatibility
 

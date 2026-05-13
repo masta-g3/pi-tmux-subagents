@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
 import { detectPiSessionsMirror, mirroredTmuxSessionName, mirrorJobToPiSessions, removeMirroredJob, updateMirroredJobStatus } from "./pi-sessions-adapter.js";
 import { buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
+import { TMUX_SESSION_PREFIX } from "./names.js";
 import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot } from "./paths.js";
 import { resolveJob, updateJob, upsertJob } from "./state.js";
 import { capturePane, execTmux, killSession, newTmuxSession, sessionExists, type TmuxExecutor } from "./tmux.js";
@@ -67,7 +68,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
   const now = Date.now();
   const id = randomUUID();
   const mirror = detectPiSessionsMirror();
-  const tmuxSession = mirror ? mirroredTmuxSessionName(id) : `pi-tmux-subagent-${id.slice(0, 12)}`;
+  const tmuxSession = mirror ? mirroredTmuxSessionName(id) : `${TMUX_SESSION_PREFIX}${id.slice(0, 12)}`;
   const job: TmuxSubagentJob = {
     id,
     agentName: input.agent.name,

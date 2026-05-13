@@ -87,6 +87,27 @@ export async function removeMirroredJob(job: TmuxSubagentJob): Promise<void> {
   });
 }
 
+export async function rewriteMirroredResultPaths(jobs: TmuxSubagentJob[], oldRoot: string, newRoot: string, env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const sessionsDir = env.PI_SESSIONS_DIR;
+  if (!sessionsDir) return 0;
+  const registryPath = join(sessionsDir, "registry.json");
+  if (!existsSync(registryPath)) return 0;
+  const resultPaths = new Map(jobs.map((job) => [job.id, job.resultPath]));
+  let rewritten = 0;
+  await withRegistryLock(sessionsDir, async () => {
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as RegistryLike;
+    const sessions = registry.sessions.map((session) => {
+      const resultPath = resultPaths.get(session.id);
+      if (!resultPath || session.resultPath === resultPath) return session;
+      if (session.resultPath && !session.resultPath.startsWith(`${oldRoot}/`)) return session;
+      rewritten += 1;
+      return { ...session, resultPath, updatedAt: Date.now() };
+    });
+    if (rewritten > 0) await writeJsonAtomic(registryPath, { ...registry, sessions });
+  });
+  return rewritten;
+}
+
 function createMirroredRow(job: TmuxSubagentJob, mirror: PiSessionsMirrorContext): ManagedSessionLike {
   const now = Date.now();
   return {

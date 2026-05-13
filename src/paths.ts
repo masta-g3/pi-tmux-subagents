@@ -1,13 +1,14 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
+import { STATE_DIR_BASENAME, STATE_ENV } from "./names.js";
 
-export function codingAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+export function codingAgentDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 }
 
-export function stateRoot(): string {
-  return process.env.PI_TMUX_SUBAGENTS_DIR ?? join(codingAgentDir(), "tmux-subagents");
+export function stateRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env[STATE_ENV] ?? join(codingAgentDir(env), STATE_DIR_BASENAME);
 }
 
 export function jobsPath(root = stateRoot()): string {
