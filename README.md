@@ -1,6 +1,12 @@
 # pi-tmux-subagents
 
-Minimal Pi extension for launching Markdown-defined subagents as real tmux-backed Pi sessions.
+Pi extension for launching Markdown-defined subagents as real tmux-backed Pi sessions. Use it to delegate focused coding-agent tasks to parallel child Pi sessions, track their results, and optionally mirror them inside `pi-agent-hub`.
+
+## Requirements
+
+- Pi coding agent with package support.
+- `tmux` available on `PATH`.
+- Node.js 20 or newer for local development and npm installs.
 
 ## Install
 
