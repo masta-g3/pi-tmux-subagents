@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { existsSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { STATE_DIR_BASENAME, STATE_ENV } from "./names.js";
 
 export function codingAgentDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -60,9 +60,4 @@ export function findProjectAgentsDir(cwd: string): string | null {
     if (parent === current) return null;
     current = parent;
   }
-}
-
-export function explicitPiSessionsDir(): string | undefined {
-  const dir = process.env.PI_SESSIONS_DIR;
-  return dir && existsSync(dir) ? dir : undefined;
 }

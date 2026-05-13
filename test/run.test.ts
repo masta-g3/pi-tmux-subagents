@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -22,7 +22,7 @@ const agent: AgentConfig = {
   tools: "none",
 };
 
-test("launchSubagent creates standalone job and tmux session", async () => withNoPiSessions(async () => {
+test("launchSubagent creates standalone job and tmux session", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-run-test-"));
   const calls: string[][] = [];
   const tmux: TmuxExecutor = async (args) => {
@@ -37,10 +37,11 @@ test("launchSubagent creates standalone job and tmux session", async () => withN
   assert.equal((await loadJobs(root)).jobs.length, 1);
   assert.equal(calls[0]?.[0], "new-session");
   assert.match(calls[0]?.at(-1) ?? "", /PI_TMUX_SUBAGENTS_JOB_ID=/);
+  assert.match(calls[0]?.at(-1) ?? "", /PI_AGENT_HUB_SESSION_ID=''/);
   assert.match(calls[0]?.at(-1) ?? "", /--extension/);
 }));
 
-test("launchSubagent persists auto-stop preference", async () => withNoPiSessions(async () => {
+test("launchSubagent persists auto-stop preference", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-launch-test-"));
   const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
 
@@ -50,7 +51,7 @@ test("launchSubagent persists auto-stop preference", async () => withNoPiSession
   assert.equal((await loadJobs(root)).jobs[0]?.autoStopOnComplete, true);
 }));
 
-test("getSubagentStatus reads heartbeat result and pane preview", async () => withNoPiSessions(async () => {
+test("getSubagentStatus reads heartbeat result and pane preview", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-status-test-"));
   const tmux: TmuxExecutor = async (args) => {
     if (args[0] === "capture-pane") return { stdout: "pane preview", stderr: "" };
@@ -75,7 +76,7 @@ test("getSubagentStatus reads heartbeat result and pane preview", async () => wi
   assert.equal(status.preview, "pane preview");
 }));
 
-test("getSubagentStatus marks missing tmux sessions stopped", async () => withNoPiSessions(async () => {
+test("getSubagentStatus marks missing tmux sessions stopped", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-missing-test-"));
   const tmux: TmuxExecutor = async (args) => {
     if (args[0] === "has-session") throw new Error("missing");
@@ -90,7 +91,7 @@ test("getSubagentStatus marks missing tmux sessions stopped", async () => withNo
   assert.equal(status.preview, undefined);
 }));
 
-test("autoStopCompletedSubagent stops clean completed jobs and preserves done result", async () => withNoPiSessions(async () => {
+test("autoStopCompletedSubagent stops clean completed jobs and preserves done result", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-test-"));
   const calls: string[][] = [];
   const tmux: TmuxExecutor = async (args) => {
@@ -120,18 +121,29 @@ test("autoStopCompletedSubagent stops clean completed jobs and preserves done re
   assert.equal(calls.at(-1)?.[0], "kill-session");
 }));
 
-test("autoStopCompletedSubagent removes mirrored pi-sessions rows after clean completion", async () => withPiSessions(async (sessionsDir) => {
+test("autoStopCompletedSubagent removes mirrored pi-agent-hub rows after clean completion", async () => withAgentHub(async (hubDir) => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-mirror-test-"));
   const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
-  await writeFile(join(sessionsDir, "registry.json"), JSON.stringify({
+  await writeFile(join(hubDir, "registry.json"), JSON.stringify({
     version: 1,
-    sessions: [{ id: "parent-1", title: "parent", cwd: root, group: "default", tmuxSession: "pi-sessions-parent", status: "running", createdAt: 1, updatedAt: 1 }],
+    sessions: [{ id: "parent-1", title: "parent", cwd: root, group: "default", tmuxSession: "pi-agent-hub-parent", status: "running", createdAt: 1, updatedAt: 1 }],
   }), "utf8");
-  process.env.PI_SESSIONS_SESSION_ID = "parent-1";
+  process.env.PI_AGENT_HUB_SESSION_ID = "parent-1";
 
-  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, autoStopOnComplete: true, tmux });
-  const launchedRegistry = JSON.parse(await readFile(join(sessionsDir, "registry.json"), "utf8"));
+  const calls: string[][] = [];
+  const recordingTmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return tmux(args);
+  };
+
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, autoStopOnComplete: true, tmux: recordingTmux });
+  const launchedRegistry = JSON.parse(await readFile(join(hubDir, "registry.json"), "utf8"));
+  assert.match(job.tmuxSession, /^pi-agent-hub-/);
   assert.ok(launchedRegistry.sessions.some((session: { id: string }) => session.id === job.id));
+  assert.match(calls[0]?.at(-1) ?? "", new RegExp(`PI_AGENT_HUB_SESSION_ID='${job.id}'`));
+  const hubHeartbeat = join(hubDir, "heartbeats", `${job.id}.json`);
+  await mkdir(join(hubDir, "heartbeats"), { recursive: true });
+  await writeFile(hubHeartbeat, JSON.stringify({ managedSessionId: job.id, state: "waiting" }), "utf8");
   const jobDir = join(root, "jobs", job.id);
   await mkdir(jobDir, { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
@@ -145,13 +157,14 @@ test("autoStopCompletedSubagent removes mirrored pi-sessions rows after clean co
   await writeFile(join(jobDir, "result.md"), "done", "utf8");
 
   const status = await autoStopCompletedSubagent(root, await getSubagentStatus(root, job.id, tmux), tmux);
-  const registry = JSON.parse(await readFile(join(sessionsDir, "registry.json"), "utf8"));
+  const registry = JSON.parse(await readFile(join(hubDir, "registry.json"), "utf8"));
 
   assert.equal(status.autoStopped, true);
   assert.deepEqual(registry.sessions.map((session: { id: string }) => session.id), ["parent-1"]);
+  assert.equal(existsSync(hubHeartbeat), false);
 }));
 
-test("autoStopCompletedSubagent returns result and warning when stop fails", async () => withNoPiSessions(async () => {
+test("autoStopCompletedSubagent returns result and warning when stop fails", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-fail-test-"));
   const tmux: TmuxExecutor = async (args) => {
     if (args[0] === "kill-session") throw new Error("tmux session disappeared");
@@ -179,7 +192,7 @@ test("autoStopCompletedSubagent returns result and warning when stop fails", asy
   assert.equal((await loadJobs(root)).jobs[0]?.status, "waiting");
 }));
 
-test("autoStopCompletedSubagent leaves non-completed jobs alive", async () => withNoPiSessions(async () => {
+test("autoStopCompletedSubagent leaves non-completed jobs alive", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-running-test-"));
   const calls: string[][] = [];
   const tmux: TmuxExecutor = async (args) => {
@@ -195,7 +208,7 @@ test("autoStopCompletedSubagent leaves non-completed jobs alive", async () => wi
   assert.notEqual(calls.at(-1)?.[0], "kill-session");
 }));
 
-test("cancelSubagent kills tmux and marks job stopped", async () => withNoPiSessions(async () => {
+test("cancelSubagent kills tmux and marks job stopped", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-cancel-test-"));
   const calls: string[][] = [];
   const tmux: TmuxExecutor = async (args) => {
@@ -209,33 +222,33 @@ test("cancelSubagent kills tmux and marks job stopped", async () => withNoPiSess
   assert.equal(calls.at(-1)?.[0], "kill-session");
 }));
 
-async function withNoPiSessions(fn: () => Promise<void>): Promise<void> {
-  const oldDir = process.env.PI_SESSIONS_DIR;
-  const oldId = process.env.PI_SESSIONS_SESSION_ID;
-  delete process.env.PI_SESSIONS_DIR;
-  delete process.env.PI_SESSIONS_SESSION_ID;
+async function withNoAgentHub(fn: () => Promise<void>): Promise<void> {
+  const oldDir = process.env.PI_AGENT_HUB_DIR;
+  const oldId = process.env.PI_AGENT_HUB_SESSION_ID;
+  delete process.env.PI_AGENT_HUB_DIR;
+  delete process.env.PI_AGENT_HUB_SESSION_ID;
   try {
     await fn();
   } finally {
-    if (oldDir === undefined) delete process.env.PI_SESSIONS_DIR;
-    else process.env.PI_SESSIONS_DIR = oldDir;
-    if (oldId === undefined) delete process.env.PI_SESSIONS_SESSION_ID;
-    else process.env.PI_SESSIONS_SESSION_ID = oldId;
+    if (oldDir === undefined) delete process.env.PI_AGENT_HUB_DIR;
+    else process.env.PI_AGENT_HUB_DIR = oldDir;
+    if (oldId === undefined) delete process.env.PI_AGENT_HUB_SESSION_ID;
+    else process.env.PI_AGENT_HUB_SESSION_ID = oldId;
   }
 }
 
-async function withPiSessions(fn: (sessionsDir: string) => Promise<void>): Promise<void> {
-  const oldDir = process.env.PI_SESSIONS_DIR;
-  const oldId = process.env.PI_SESSIONS_SESSION_ID;
-  const sessionsDir = mkdtempSync(join(tmpdir(), "pi-sessions-mirror-test-"));
-  process.env.PI_SESSIONS_DIR = sessionsDir;
-  delete process.env.PI_SESSIONS_SESSION_ID;
+async function withAgentHub(fn: (hubDir: string) => Promise<void>): Promise<void> {
+  const oldDir = process.env.PI_AGENT_HUB_DIR;
+  const oldId = process.env.PI_AGENT_HUB_SESSION_ID;
+  const hubDir = mkdtempSync(join(tmpdir(), "pi-agent-hub-mirror-test-"));
+  process.env.PI_AGENT_HUB_DIR = hubDir;
+  delete process.env.PI_AGENT_HUB_SESSION_ID;
   try {
-    await fn(sessionsDir);
+    await fn(hubDir);
   } finally {
-    if (oldDir === undefined) delete process.env.PI_SESSIONS_DIR;
-    else process.env.PI_SESSIONS_DIR = oldDir;
-    if (oldId === undefined) delete process.env.PI_SESSIONS_SESSION_ID;
-    else process.env.PI_SESSIONS_SESSION_ID = oldId;
+    if (oldDir === undefined) delete process.env.PI_AGENT_HUB_DIR;
+    else process.env.PI_AGENT_HUB_DIR = oldDir;
+    if (oldId === undefined) delete process.env.PI_AGENT_HUB_SESSION_ID;
+    else process.env.PI_AGENT_HUB_SESSION_ID = oldId;
   }
 }

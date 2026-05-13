@@ -1,6 +1,6 @@
 - id: tmux-subagents-001
   status: done
-  description: Create a minimal tmux-native Pi subagent extension with optional pi-sessions
+  description: Create a minimal tmux-native Pi subagent extension with optional pi-agent-hub
     dashboard nesting
   priority: 2
   depends_on: []

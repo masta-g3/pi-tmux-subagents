@@ -2,7 +2,7 @@ import { lstat, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { LEGACY_STATE_DIR_BASENAME, LEGACY_TMUX_SESSION_PREFIX, STATE_DIR_BASENAME, STATE_ENV, TMUX_SESSION_PREFIX } from "./names.js";
 import { codingAgentDir, metadataPath } from "./paths.js";
-import { rewriteMirroredResultPaths } from "./pi-sessions-adapter.js";
+import { rewriteHubResultPaths } from "./pi-agent-hub-adapter.js";
 import { loadJobs, saveJobs } from "./state.js";
 import { execTmux, renameSession, type TmuxExecutor } from "./tmux.js";
 import type { TmuxSubagentJob, TmuxSubagentsRegistry } from "./types.js";
@@ -68,7 +68,7 @@ export async function migrateLegacyState(options: { env?: NodeJS.ProcessEnv; tmu
   const registry = await loadJobs(root);
   const rewritten = await rewriteRegistry(root, legacyRoot, registry, tmux, summary);
   if (rewritten) await saveJobs(root, registry);
-  summary.rewrittenMirrorRows = await rewriteMirroredResultPaths(registry.jobs, legacyRoot, root, env);
+  summary.rewrittenMirrorRows = await rewriteHubResultPaths(registry.jobs, legacyRoot, root, env);
   return summary;
 }
 

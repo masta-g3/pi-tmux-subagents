@@ -133,23 +133,23 @@ test("migrateLegacyState keeps mirrored tmux names and rewrites mirror result pa
   const agent = agentRoot();
   const oldRoot = join(agent, "tmux-subagents");
   const newRoot = join(agent, "pi-tmux-subagents");
-  const sessionsDir = join(agent, "pi-sessions");
-  const mirrored = job("mirror123456", oldRoot, "pi-sessions-mirror123456");
+  const hubDir = join(agent, "pi-agent-hub");
+  const mirrored = job("mirror123456", oldRoot, "pi-agent-hub-mirror123456");
   await writeRegistry(oldRoot, [mirrored]);
-  await mkdir(sessionsDir, { recursive: true });
-  await writeFile(join(sessionsDir, "registry.json"), `${JSON.stringify({
+  await mkdir(hubDir, { recursive: true });
+  await writeFile(join(hubDir, "registry.json"), `${JSON.stringify({
     version: 1,
     sessions: [
       { id: mirrored.id, title: "scout", cwd: oldRoot, group: "default", tmuxSession: mirrored.tmuxSession, status: "running", resultPath: mirrored.resultPath, createdAt: 1, updatedAt: 1 },
     ],
   }, null, 2)}\n`, "utf8");
 
-  const summary = await migrateLegacyState({ env: { PI_CODING_AGENT_DIR: agent, PI_SESSIONS_DIR: sessionsDir }, tmux: async () => ({ stdout: "", stderr: "" }) });
+  const summary = await migrateLegacyState({ env: { PI_CODING_AGENT_DIR: agent, PI_AGENT_HUB_DIR: hubDir }, tmux: async () => ({ stdout: "", stderr: "" }) });
 
   const migrated = (await loadJobs(newRoot)).jobs[0]!;
   assert.equal(migrated.tmuxSession, mirrored.tmuxSession);
   assert.equal(migrated.resultPath, join(newRoot, "jobs", mirrored.id, "result.md"));
-  const registry = JSON.parse(await readFile(join(sessionsDir, "registry.json"), "utf8"));
+  const registry = JSON.parse(await readFile(join(hubDir, "registry.json"), "utf8"));
   assert.equal(registry.sessions[0].tmuxSession, mirrored.tmuxSession);
   assert.equal(registry.sessions[0].resultPath, migrated.resultPath);
   assert.equal(summary.rewrittenMirrorRows, 1);

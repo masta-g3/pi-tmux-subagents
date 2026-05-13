@@ -11,8 +11,8 @@ tmux subagent scout
  ✓ scout · done · 2m39s
    ⎿  Done
       <result preview>
-   tmux: pi-sessions-abc123
-   attach: tmux attach-session -t pi-sessions-abc123
+   tmux: pi-agent-hub-abc123
+   attach: tmux attach-session -t pi-agent-hub-abc123
    output: /path/to/result.md
    stop: tmux_subagent({ action: "stop", childId: "..." })
 ```

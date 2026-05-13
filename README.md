@@ -62,7 +62,7 @@ tmux_subagent({ action: "status", childId: "abc123" })
 tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 ```
 
-Child sessions auto-stop after clean completion by default so completed subagents do not clutter tmux or `pi-sessions` dashboards. Pass `autoStopOnComplete: false` when you want to inspect, attach, or ask follow-up questions after completion, then use `action: "stop"` when done. Auto-stop only applies after clean completion; failed or interrupted sessions stay alive for inspection. Background jobs auto-stop when a later `status` call observes clean completion.
+Child sessions auto-stop after clean completion by default so completed subagents do not clutter tmux or `pi-agent-hub` dashboards. Pass `autoStopOnComplete: false` when you want to inspect, attach, or ask follow-up questions after completion, then use `action: "stop"` when done. Auto-stop only applies after clean completion; failed or interrupted sessions stay alive for inspection. Background jobs auto-stop when a later `status` call observes clean completion.
 
 Foreground runs and explicit status calls render a compact parent-session summary:
 
@@ -71,14 +71,14 @@ tmux subagent scout
  ✓ scout · done · 2m39s
    ⎿  Done
       <result preview>
-   tmux: pi-sessions-abc123
-   attach: tmux attach-session -t pi-sessions-abc123
+   tmux: pi-agent-hub-abc123
+   attach: tmux attach-session -t pi-agent-hub-abc123
    output: /path/to/result.md
    stop: tmux_subagent({ action: "stop", childId: "..." })
 ```
 
 State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset. On first run after upgrading, the old default `<PI_CODING_AGENT_DIR>/tmux-subagents` directory is moved to the new default and replaced with a symlink when possible so already-running children can keep writing heartbeats/results.
 
-## pi-sessions compatibility
+## pi-agent-hub integration
 
-The extension is standalone. When launched from a managed [`pi-sessions`](https://github.com/masta-g3/pi-sessions) parent with explicit `PI_SESSIONS_DIR` and `PI_SESSIONS_SESSION_ID`, it mirrors child rows into the existing `pi-sessions` registry and writes dashboard-compatible heartbeats. Without those env vars, no `pi-sessions` state is created or required.
+The extension is standalone. When launched from a managed `pi-agent-hub` parent with `PI_AGENT_HUB_DIR` and `PI_AGENT_HUB_SESSION_ID`, it mirrors child rows into the hub registry and writes dashboard-compatible heartbeats. Without those env vars, no hub state is created or required.

@@ -3,8 +3,8 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { TmuxSubagentJob } from "./types.js";
 
-export interface PiSessionsMirrorContext {
-  sessionsDir: string;
+export interface AgentHubMirrorContext {
+  hubDir: string;
   parentId: string;
   parentGroup: string;
 }
@@ -30,28 +30,28 @@ interface RegistryLike {
   sessions: ManagedSessionLike[];
 }
 
-export function detectPiSessionsMirror(): PiSessionsMirrorContext | null {
-  const sessionsDir = process.env.PI_SESSIONS_DIR;
-  const parentId = process.env.PI_SESSIONS_SESSION_ID;
-  if (!sessionsDir || !parentId) return null;
+export function detectAgentHubMirror(): AgentHubMirrorContext | null {
+  const hubDir = process.env.PI_AGENT_HUB_DIR;
+  const parentId = process.env.PI_AGENT_HUB_SESSION_ID;
+  if (!hubDir || !parentId) return null;
 
-  const registryPath = join(sessionsDir, "registry.json");
+  const registryPath = join(hubDir, "registry.json");
   if (!existsSync(registryPath)) return null;
 
   const registry = JSON.parse(readFileSync(registryPath, "utf8")) as RegistryLike;
   const parent = registry.sessions?.find((session) => session.id === parentId);
   if (!parent) return null;
 
-  return { sessionsDir, parentId, parentGroup: parent.group ?? "default" };
+  return { hubDir, parentId, parentGroup: parent.group ?? "default" };
 }
 
 export function mirroredTmuxSessionName(childId: string): string {
-  return `pi-sessions-${childId.slice(0, 12)}`;
+  return `pi-agent-hub-${childId.slice(0, 12)}`;
 }
 
-export async function mirrorJobToPiSessions(job: TmuxSubagentJob, mirror: PiSessionsMirrorContext): Promise<void> {
-  const registryPath = join(mirror.sessionsDir, "registry.json");
-  await withRegistryLock(mirror.sessionsDir, async () => {
+export async function mirrorJobToAgentHub(job: TmuxSubagentJob, mirror: AgentHubMirrorContext): Promise<void> {
+  const registryPath = join(mirror.hubDir, "registry.json");
+  await withRegistryLock(mirror.hubDir, async () => {
     const registry = JSON.parse(await readFile(registryPath, "utf8")) as RegistryLike;
     if (!registry.sessions.some((session) => session.id === mirror.parentId)) return;
     const row = createMirroredRow(job, mirror);
@@ -64,11 +64,11 @@ export async function mirrorJobToPiSessions(job: TmuxSubagentJob, mirror: PiSess
 }
 
 export async function updateMirroredJobStatus(job: TmuxSubagentJob, status: string, error?: string): Promise<void> {
-  const sessionsDir = process.env.PI_SESSIONS_DIR;
-  if (!sessionsDir) return;
-  const registryPath = join(sessionsDir, "registry.json");
+  const hubDir = process.env.PI_AGENT_HUB_DIR;
+  if (!hubDir) return;
+  const registryPath = join(hubDir, "registry.json");
   if (!existsSync(registryPath)) return;
-  await withRegistryLock(sessionsDir, async () => {
+  await withRegistryLock(hubDir, async () => {
     const registry = JSON.parse(await readFile(registryPath, "utf8")) as RegistryLike;
     const sessions = registry.sessions.map((session) => session.id === job.id ? { ...session, status, error, updatedAt: Date.now() } : session);
     await writeJsonAtomic(registryPath, { ...registry, sessions });
@@ -76,25 +76,26 @@ export async function updateMirroredJobStatus(job: TmuxSubagentJob, status: stri
 }
 
 export async function removeMirroredJob(job: TmuxSubagentJob): Promise<void> {
-  const sessionsDir = process.env.PI_SESSIONS_DIR;
-  if (!sessionsDir) return;
-  const registryPath = join(sessionsDir, "registry.json");
+  const hubDir = process.env.PI_AGENT_HUB_DIR;
+  if (!hubDir) return;
+  const registryPath = join(hubDir, "registry.json");
   if (!existsSync(registryPath)) return;
-  await withRegistryLock(sessionsDir, async () => {
+  await withRegistryLock(hubDir, async () => {
     const registry = JSON.parse(await readFile(registryPath, "utf8")) as RegistryLike;
     const sessions = registry.sessions.filter((session) => session.id !== job.id);
     await writeJsonAtomic(registryPath, { ...registry, sessions });
   });
+  await rm(join(hubDir, "heartbeats", `${job.id}.json`), { force: true });
 }
 
-export async function rewriteMirroredResultPaths(jobs: TmuxSubagentJob[], oldRoot: string, newRoot: string, env: NodeJS.ProcessEnv = process.env): Promise<number> {
-  const sessionsDir = env.PI_SESSIONS_DIR;
-  if (!sessionsDir) return 0;
-  const registryPath = join(sessionsDir, "registry.json");
+export async function rewriteHubResultPaths(jobs: TmuxSubagentJob[], oldRoot: string, newRoot: string, env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const hubDir = env.PI_AGENT_HUB_DIR;
+  if (!hubDir) return 0;
+  const registryPath = join(hubDir, "registry.json");
   if (!existsSync(registryPath)) return 0;
   const resultPaths = new Map(jobs.map((job) => [job.id, job.resultPath]));
   let rewritten = 0;
-  await withRegistryLock(sessionsDir, async () => {
+  await withRegistryLock(hubDir, async () => {
     const registry = JSON.parse(await readFile(registryPath, "utf8")) as RegistryLike;
     const sessions = registry.sessions.map((session) => {
       const resultPath = resultPaths.get(session.id);
@@ -108,7 +109,7 @@ export async function rewriteMirroredResultPaths(jobs: TmuxSubagentJob[], oldRoo
   return rewritten;
 }
 
-function createMirroredRow(job: TmuxSubagentJob, mirror: PiSessionsMirrorContext): ManagedSessionLike {
+function createMirroredRow(job: TmuxSubagentJob, mirror: AgentHubMirrorContext): ManagedSessionLike {
   const now = Date.now();
   return {
     id: job.id,
@@ -127,8 +128,8 @@ function createMirroredRow(job: TmuxSubagentJob, mirror: PiSessionsMirrorContext
   };
 }
 
-async function withRegistryLock<T>(sessionsDir: string, fn: () => Promise<T>): Promise<T> {
-  const lockDir = join(sessionsDir, "registry.lock");
+async function withRegistryLock<T>(hubDir: string, fn: () => Promise<T>): Promise<T> {
+  const lockDir = join(hubDir, "registry.lock");
   const started = Date.now();
   while (true) {
     try {
@@ -136,7 +137,7 @@ async function withRegistryLock<T>(sessionsDir: string, fn: () => Promise<T>): P
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() - started > 5000) throw new Error(`Timed out waiting for pi-sessions registry lock: ${lockDir}`);
+      if (Date.now() - started > 5000) throw new Error(`Timed out waiting for pi-agent-hub registry lock: ${lockDir}`);
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }

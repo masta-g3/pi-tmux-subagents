@@ -20,14 +20,14 @@ Created `pi-tmux-subagents`, a standalone Pi extension that launches Markdown-de
   - `jobs/<child-id>/heartbeat.json`
   - `jobs/<child-id>/result.md`
   - `jobs/<child-id>/metadata.json`
-- Child bootstrap extension writes standalone heartbeats and optional `pi-sessions` heartbeat metadata.
+- Child bootstrap extension writes standalone heartbeats and optional `pi-agent-hub` heartbeat metadata.
 - Child sessions intentionally stay alive after completion (`waiting` after `running`) so parent/human operators can inspect or follow up; callers stop them explicitly when done.
 - Foreground waits return `result.md` when present, otherwise pane preview; dead child tmux sessions are marked `stopped`.
 - Recursion guard using `PI_SUBAGENT_DEPTH` and agent `maxDepth`.
 
-## Optional pi-sessions compatibility
+## Optional pi-agent-hub compatibility
 
-Updated `pi-command-center`/`pi-sessions` to support optional mirrored subagent rows without making `pi-tmux-subagents` depend on it:
+Updated `pi-command-center`/`pi-agent-hub` to support optional mirrored subagent rows without making `pi-tmux-subagents` depend on it:
 
 - `ManagedSession` and `Heartbeat` accept optional `kind`, `parentId`, `agentName`, `taskPreview`, `resultPath`, and `resultSummary` fields.
 - Registry mutations can use a lock-protected `updateRegistry` path so mirrored rows are not clobbered by dashboard refresh/session commands.
@@ -44,7 +44,7 @@ Updated `pi-command-center`/`pi-sessions` to support optional mirrored subagent 
   - local install with `pi install`
   - agent discovery from `~/.pi/agent/agents/*.md`
   - standalone tmux launch/status/stop using a fake child Pi executable
-  - optional `pi-sessions` mirrored registry row and heartbeat
+  - optional `pi-agent-hub` mirrored registry row and heartbeat
   - live smoke agent launch after granting the child `write` tool access for `result.md`
 
 ## Durable notes

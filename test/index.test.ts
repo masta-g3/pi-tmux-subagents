@@ -8,21 +8,21 @@ import extension, { resolveAutoStopOnComplete } from "../src/index.js";
 function isolatePiStateEnv(agentDir: string): () => void {
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const oldStateEnv = process.env.PI_TMUX_SUBAGENTS_DIR;
-  const oldSessionsDir = process.env.PI_SESSIONS_DIR;
-  const oldSessionsId = process.env.PI_SESSIONS_SESSION_ID;
+  const oldHubDir = process.env.PI_AGENT_HUB_DIR;
+  const oldHubId = process.env.PI_AGENT_HUB_SESSION_ID;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   delete process.env.PI_TMUX_SUBAGENTS_DIR;
-  delete process.env.PI_SESSIONS_DIR;
-  delete process.env.PI_SESSIONS_SESSION_ID;
+  delete process.env.PI_AGENT_HUB_DIR;
+  delete process.env.PI_AGENT_HUB_SESSION_ID;
   return () => {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
     if (oldStateEnv === undefined) delete process.env.PI_TMUX_SUBAGENTS_DIR;
     else process.env.PI_TMUX_SUBAGENTS_DIR = oldStateEnv;
-    if (oldSessionsDir === undefined) delete process.env.PI_SESSIONS_DIR;
-    else process.env.PI_SESSIONS_DIR = oldSessionsDir;
-    if (oldSessionsId === undefined) delete process.env.PI_SESSIONS_SESSION_ID;
-    else process.env.PI_SESSIONS_SESSION_ID = oldSessionsId;
+    if (oldHubDir === undefined) delete process.env.PI_AGENT_HUB_DIR;
+    else process.env.PI_AGENT_HUB_DIR = oldHubDir;
+    if (oldHubId === undefined) delete process.env.PI_AGENT_HUB_SESSION_ID;
+    else process.env.PI_AGENT_HUB_SESSION_ID = oldHubId;
   };
 }
 
@@ -52,7 +52,7 @@ test("tmux_subagent status reads jobs from migrated default root", async () => {
   mkdirSync(oldState, { recursive: true });
   writeFileSync(join(oldState, "jobs.json"), `${JSON.stringify({
     version: 1,
-    jobs: [{ id: "child-1", agentName: "scout", taskPreview: "Inspect", cwd: root, tmuxSession: "pi-sessions-child-1", status: "starting", resultPath: join(oldState, "jobs", "child-1", "result.md"), createdAt: 1, updatedAt: 1 }],
+    jobs: [{ id: "child-1", agentName: "scout", taskPreview: "Inspect", cwd: root, tmuxSession: "pi-agent-hub-child-1", status: "starting", resultPath: join(oldState, "jobs", "child-1", "result.md"), createdAt: 1, updatedAt: 1 }],
   }, null, 2)}\n`);
 
   const restorePiEnv = isolatePiStateEnv(agentDir);
@@ -104,7 +104,7 @@ test("tmux_subagent renders status with active theme tokens", () => {
         agentName: "plan-critic",
         taskPreview: "Review plan",
         cwd: "/repo",
-        tmuxSession: "pi-sessions-child-123",
+        tmuxSession: "pi-agent-hub-child-123",
         status: "running",
         resultPath: "/tmp/result.md",
         createdAt: 1_000,
@@ -119,8 +119,8 @@ test("tmux_subagent renders status with active theme tokens", () => {
   assert.match(rendered, /<warning>⟳<\/warning> <toolTitle><b>plan-critic<\/b><\/toolTitle>/);
   assert.match(rendered, /<muted>Pane preview:<\/muted>/);
   assert.match(rendered, /<toolOutput>## Scope<\/toolOutput>/);
-  assert.match(rendered, /<dim>tmux:<\/dim> <muted>pi-sessions-child-123<\/muted>/);
-  assert.match(rendered, /<dim>attach:<\/dim> <mdCode>tmux attach-session -t pi-sessions-child-123<\/mdCode>/);
+  assert.match(rendered, /<dim>tmux:<\/dim> <muted>pi-agent-hub-child-123<\/muted>/);
+  assert.match(rendered, /<dim>attach:<\/dim> <mdCode>tmux attach-session -t pi-agent-hub-child-123<\/mdCode>/);
   assert.match(rendered, /<dim>output:<\/dim> <mdCode>\/tmp\/result\.md<\/mdCode>/);
   assert.match(rendered, /<dim>stop:<\/dim> <muted>tmux_subagent/);
 });

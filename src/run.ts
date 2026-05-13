@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
-import { detectPiSessionsMirror, mirroredTmuxSessionName, mirrorJobToPiSessions, removeMirroredJob, updateMirroredJobStatus } from "./pi-sessions-adapter.js";
+import { detectAgentHubMirror, mirroredTmuxSessionName, mirrorJobToAgentHub, removeMirroredJob, updateMirroredJobStatus } from "./pi-agent-hub-adapter.js";
 import { buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
 import { TMUX_SESSION_PREFIX } from "./names.js";
 import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot } from "./paths.js";
@@ -67,7 +67,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
   const tmux = input.tmux ?? execTmux;
   const now = Date.now();
   const id = randomUUID();
-  const mirror = detectPiSessionsMirror();
+  const mirror = detectAgentHubMirror();
   const tmuxSession = mirror ? mirroredTmuxSessionName(id) : `${TMUX_SESSION_PREFIX}${id.slice(0, 12)}`;
   const job: TmuxSubagentJob = {
     id,
@@ -88,7 +88,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
   mkdirSync(dirname(metadataPath(root, id)), { recursive: true });
   await writeFile(metadataPath(root, id), `${JSON.stringify({ job, agent: input.agent }, null, 2)}\n`, "utf8");
   await upsertJob(root, job);
-  if (mirror) await mirrorJobToPiSessions(job, mirror);
+  if (mirror) await mirrorJobToAgentHub(job, mirror);
 
   const args = buildPiArgs({
     agent: input.agent,
@@ -104,12 +104,16 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     PI_SUBAGENT_TASK_PREVIEW: job.taskPreview,
     PI_SUBAGENT_RESULT_PATH: job.resultPath,
     PI_SUBAGENT_DEPTH: String(Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) + 1),
+    PI_AGENT_HUB_DIR: "",
+    PI_AGENT_HUB_SESSION_ID: "",
+    PI_AGENT_HUB_PARENT_ID: "",
+    PI_AGENT_HUB_KIND: "",
   };
-  if (process.env.PI_SESSIONS_DIR) env.PI_SESSIONS_DIR = process.env.PI_SESSIONS_DIR;
   if (mirror) {
-    env.PI_SESSIONS_SESSION_ID = id;
-    env.PI_SESSIONS_PARENT_ID = mirror.parentId;
-    env.PI_SESSIONS_KIND = "subagent";
+    env.PI_AGENT_HUB_DIR = mirror.hubDir;
+    env.PI_AGENT_HUB_SESSION_ID = id;
+    env.PI_AGENT_HUB_PARENT_ID = mirror.parentId;
+    env.PI_AGENT_HUB_KIND = "subagent";
   }
 
   try {

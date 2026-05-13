@@ -86,16 +86,16 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     };
     await writeJson(heartbeatPath(stateRoot, jobId), data);
 
-    if (process.env.PI_SESSIONS_DIR && process.env.PI_SESSIONS_SESSION_ID) {
-      await writeJson(join(process.env.PI_SESSIONS_DIR, "heartbeats", `${process.env.PI_SESSIONS_SESSION_ID}.json`), {
-        managedSessionId: process.env.PI_SESSIONS_SESSION_ID,
+    if (process.env.PI_AGENT_HUB_DIR && process.env.PI_AGENT_HUB_SESSION_ID) {
+      await writeJson(join(process.env.PI_AGENT_HUB_DIR, "heartbeats", `${process.env.PI_AGENT_HUB_SESSION_ID}.json`), {
+        managedSessionId: process.env.PI_AGENT_HUB_SESSION_ID,
         cwd: ctx.cwd,
         state,
         stateSince,
         message,
         updatedAt: now,
-        kind: process.env.PI_SESSIONS_KIND,
-        parentId: process.env.PI_SESSIONS_PARENT_ID,
+        kind: process.env.PI_AGENT_HUB_KIND,
+        parentId: process.env.PI_AGENT_HUB_PARENT_ID,
         agentName: process.env.PI_SUBAGENT_AGENT,
         taskPreview: process.env.PI_SUBAGENT_TASK_PREVIEW,
         resultPath: process.env.PI_SUBAGENT_RESULT_PATH,

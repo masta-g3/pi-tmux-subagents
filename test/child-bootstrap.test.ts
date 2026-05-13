@@ -44,6 +44,32 @@ test("child bootstrap does not overwrite an explicit result file", async () => {
   });
 });
 
+test("child bootstrap mirrors heartbeats to pi-agent-hub when configured", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-hub-heartbeat-test-"));
+  const hubDir = join(root, "hub");
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+
+  await withChildEnv(root, resultPath, async () => {
+    process.env.PI_AGENT_HUB_DIR = hubDir;
+    process.env.PI_AGENT_HUB_SESSION_ID = "child-1";
+    process.env.PI_AGENT_HUB_PARENT_ID = "parent-1";
+    process.env.PI_AGENT_HUB_KIND = "subagent";
+    process.env.PI_SUBAGENT_AGENT = "scout";
+    process.env.PI_SUBAGENT_TASK_PREVIEW = "Inspect auth";
+
+    const handlers = loadBootstrapHandlers();
+    await handlers.session_start?.({ type: "session_start" } as any, { cwd: root });
+
+    const heartbeat = JSON.parse(await readFile(join(hubDir, "heartbeats", "child-1.json"), "utf8"));
+    assert.equal(heartbeat.kind, "subagent");
+    assert.equal(heartbeat.parentId, "parent-1");
+    assert.equal(heartbeat.agentName, "scout");
+    assert.equal(heartbeat.taskPreview, "Inspect auth");
+
+    await handlers.session_shutdown?.({ type: "session_shutdown" } as any, { cwd: root });
+  });
+});
+
 function loadBootstrapHandlers(): Record<string, Function> {
   const handlers: Record<string, Function> = {};
   childBootstrap({
@@ -55,20 +81,31 @@ function loadBootstrapHandlers(): Record<string, Function> {
 }
 
 async function withChildEnv(root: string, resultPath: string, fn: () => Promise<void>): Promise<void> {
-  const oldJobId = process.env.PI_TMUX_SUBAGENTS_JOB_ID;
-  const oldDir = process.env.PI_TMUX_SUBAGENTS_DIR;
-  const oldResult = process.env.PI_SUBAGENT_RESULT_PATH;
+  const saved = new Map<string, string | undefined>();
+  const keys = [
+    "PI_TMUX_SUBAGENTS_JOB_ID",
+    "PI_TMUX_SUBAGENTS_DIR",
+    "PI_SUBAGENT_RESULT_PATH",
+    "PI_AGENT_HUB_DIR",
+    "PI_AGENT_HUB_SESSION_ID",
+    "PI_AGENT_HUB_PARENT_ID",
+    "PI_AGENT_HUB_KIND",
+    "PI_SUBAGENT_AGENT",
+    "PI_SUBAGENT_TASK_PREVIEW",
+  ];
+  for (const key of keys) {
+    saved.set(key, process.env[key]);
+    delete process.env[key];
+  }
   process.env.PI_TMUX_SUBAGENTS_JOB_ID = "child-1";
   process.env.PI_TMUX_SUBAGENTS_DIR = root;
   process.env.PI_SUBAGENT_RESULT_PATH = resultPath;
   try {
     await fn();
   } finally {
-    if (oldJobId === undefined) delete process.env.PI_TMUX_SUBAGENTS_JOB_ID;
-    else process.env.PI_TMUX_SUBAGENTS_JOB_ID = oldJobId;
-    if (oldDir === undefined) delete process.env.PI_TMUX_SUBAGENTS_DIR;
-    else process.env.PI_TMUX_SUBAGENTS_DIR = oldDir;
-    if (oldResult === undefined) delete process.env.PI_SUBAGENT_RESULT_PATH;
-    else process.env.PI_SUBAGENT_RESULT_PATH = oldResult;
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }

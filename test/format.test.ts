@@ -11,7 +11,7 @@ function status(overrides: Partial<SubagentStatusResult> = {}): SubagentStatusRe
       agentName: "scout",
       taskPreview: "Inspect auth",
       cwd: "/repo",
-      tmuxSession: "pi-sessions-child-123",
+      tmuxSession: "pi-agent-hub-child-123",
       status: "waiting",
       resultPath: "/tmp/jobs/child-123/result.md",
       createdAt: 1_000,
@@ -36,8 +36,8 @@ test("formatStatus renders compact done summary with attach and output paths", (
   assert.match(output, /^tmux subagent scout\n ✓ scout · done · 2m39s/m);
   assert.match(output, /   ⎿  Done/);
   assert.match(output, /      Changed src\/index\.ts/);
-  assert.match(output, /   tmux: pi-sessions-child-123/);
-  assert.match(output, /   attach: tmux attach-session -t pi-sessions-child-123/);
+  assert.match(output, /   tmux: pi-agent-hub-child-123/);
+  assert.match(output, /   attach: tmux attach-session -t pi-agent-hub-child-123/);
   assert.match(output, /   output: \/tmp\/jobs\/child-123\/result\.md/);
   assert.match(output, /   stop: tmux_subagent\({ action: "stop", childId: "child-123" }\)/);
 });

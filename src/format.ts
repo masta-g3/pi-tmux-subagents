@@ -48,7 +48,7 @@ export function formatStatus(status: SubagentStatusResult): string {
   );
   if (status.autoStopped) {
     lines.push("   auto-stopped after completion");
-    if (status.mirrorCleanupError) lines.push(`   pi-sessions cleanup failed: ${status.mirrorCleanupError}`);
+    if (status.mirrorCleanupError) lines.push(`   pi-agent-hub cleanup failed: ${status.mirrorCleanupError}`);
   } else {
     if (status.autoStopError) lines.push(`   auto-stop failed: ${status.autoStopError}`);
     lines.push(`   stop: tmux_subagent({ action: "stop", childId: "${status.job.id}" })`);
