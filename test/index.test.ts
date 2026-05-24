@@ -75,6 +75,16 @@ test("tmux_subagent exposes stop as a shutdown alias", () => {
   assert.ok(tool.parameters.properties.action.enum.includes("stop"));
 });
 
+test("tmux_subagent exposes persistent send and wait actions", () => {
+  let tool: any;
+  extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+  assert.ok(tool.parameters.properties.action.enum.includes("send"));
+  assert.ok(tool.parameters.properties.action.enum.includes("wait"));
+  assert.equal(tool.parameters.properties.message.type, "string");
+  assert.equal(tool.parameters.properties.timeoutMs.type, "number");
+});
+
 test("tmux_subagent exposes runtime auto-stop option enabled by default", () => {
   let tool: any;
   extension({ registerTool(def: any) { tool = def; }, on() {} } as any);

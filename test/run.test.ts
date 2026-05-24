@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { autoStopCompletedSubagent, launchSubagent, getSubagentStatus, cancelSubagent } from "../src/run.js";
+import { autoStopCompletedSubagent, launchSubagent, getSubagentStatus, cancelSubagent, sendSubagentMessage, waitForSubagent } from "../src/run.js";
 import { loadJobs } from "../src/state.js";
 import type { AgentConfig } from "../src/types.js";
 import type { TmuxExecutor } from "../src/tmux.js";
@@ -45,10 +45,14 @@ test("launchSubagent persists auto-stop preference", async () => withNoAgentHub(
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-launch-test-"));
   const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
 
-  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, autoStopOnComplete: true, tmux });
+  const enabled = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, autoStopOnComplete: true, tmux });
+  const disabled = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, autoStopOnComplete: false, tmux });
+  const jobs = (await loadJobs(root)).jobs;
 
-  assert.equal(job.autoStopOnComplete, true);
-  assert.equal((await loadJobs(root)).jobs[0]?.autoStopOnComplete, true);
+  assert.equal(enabled.autoStopOnComplete, true);
+  assert.equal(disabled.autoStopOnComplete, false);
+  assert.equal(jobs.find((job) => job.id === enabled.id)?.autoStopOnComplete, true);
+  assert.equal(jobs.find((job) => job.id === disabled.id)?.autoStopOnComplete, false);
 }));
 
 test("getSubagentStatus reads heartbeat result and pane preview", async () => withNoAgentHub(async () => {
@@ -74,6 +78,52 @@ test("getSubagentStatus reads heartbeat result and pane preview", async () => wi
   assert.equal(status.status, "waiting");
   assert.equal(status.result, "done");
   assert.equal(status.preview, "pane preview");
+}));
+
+test("getSubagentStatus keeps latestResult scoped to turn results", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-legacy-status-test-"));
+  const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+  const jobDir = join(root, "jobs", job.id);
+  await mkdir(jobDir, { recursive: true });
+  await writeFile(join(jobDir, "result.md"), "legacy", "utf8");
+
+  const status = await getSubagentStatus(root, job.id, tmux);
+
+  assert.equal(status.result, "legacy");
+  assert.equal(status.latestResult, undefined);
+}));
+
+test("getSubagentStatus prefers latest turn result", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-turn-status-test-"));
+  const tmux: TmuxExecutor = async (args) => {
+    if (args[0] === "capture-pane") return { stdout: "pane preview", stderr: "" };
+    return { stdout: "", stderr: "" };
+  };
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+  const jobDir = join(root, "jobs", job.id);
+  const turnsDir = join(jobDir, "turns");
+  await mkdir(turnsDir, { recursive: true });
+  await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
+    jobId: job.id,
+    cwd: root,
+    state: "waiting",
+    stateSince: 2,
+    updatedAt: 3,
+    seenRunning: true
+  }), "utf8");
+  await writeFile(join(jobDir, "result.md"), "latest", "utf8");
+  await writeFile(join(turnsDir, "001-result.md"), "turn one", "utf8");
+  await writeFile(join(turnsDir, "turns.json"), JSON.stringify({
+    version: 1,
+    turns: [{ index: 1, status: "waiting", startedAt: 2, completedAt: 3, resultPath: join(turnsDir, "001-result.md") }],
+  }), "utf8");
+
+  const status = await getSubagentStatus(root, job.id, tmux);
+
+  assert.equal(status.latestTurn?.index, 1);
+  assert.equal(status.latestResult, "turn one");
+  assert.equal(status.result, "turn one");
 }));
 
 test("getSubagentStatus marks missing tmux sessions stopped", async () => withNoAgentHub(async () => {
@@ -206,6 +256,119 @@ test("autoStopCompletedSubagent leaves non-completed jobs alive", async () => wi
   assert.equal(status.status, "starting");
   assert.equal(status.autoStopped, undefined);
   assert.notEqual(calls.at(-1)?.[0], "kill-session");
+}));
+
+test("sendSubagentMessage pastes messages into idle live sessions", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-send-test-"));
+  const calls: string[][] = [];
+  const tmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  };
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+  const jobDir = join(root, "jobs", job.id);
+  await mkdir(jobDir, { recursive: true });
+  await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
+    jobId: job.id,
+    cwd: root,
+    state: "waiting",
+    stateSince: 2,
+    updatedAt: 3,
+    seenRunning: true
+  }), "utf8");
+
+  await sendSubagentMessage(root, job.id, "hello 'there'\nsecond line", tmux);
+
+  const sendCalls = calls.filter((args) => ["set-buffer", "paste-buffer", "send-keys", "delete-buffer"].includes(args[0] ?? ""));
+  const bufferName = sendCalls[0]?.[2];
+  assert.match(bufferName ?? "", /^pi-tmux-subagents-/);
+  assert.deepEqual(sendCalls, [
+    ["set-buffer", "-b", bufferName, "--", "hello 'there'\nsecond line"],
+    ["paste-buffer", "-b", bufferName, "-t", job.tmuxSession],
+    ["send-keys", "-t", job.tmuxSession, "Enter"],
+    ["delete-buffer", "-b", bufferName],
+  ]);
+}));
+
+test("sendSubagentMessage rejects busy sessions", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-send-busy-test-"));
+  const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+  const jobDir = join(root, "jobs", job.id);
+  await mkdir(jobDir, { recursive: true });
+  await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
+    jobId: job.id,
+    cwd: root,
+    state: "running",
+    stateSince: 2,
+    updatedAt: 3,
+    seenRunning: true
+  }), "utf8");
+
+  await assert.rejects(() => sendSubagentMessage(root, job.id, "hello", tmux), /busy subagent/);
+}));
+
+test("waitForSubagent can wait for a later completed turn", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-wait-turn-test-"));
+  let calls = 0;
+  const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+  const jobDir = join(root, "jobs", job.id);
+  await mkdir(join(jobDir, "turns"), { recursive: true });
+  await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
+    jobId: job.id,
+    cwd: root,
+    state: "waiting",
+    stateSince: 2,
+    updatedAt: 3,
+    seenRunning: true
+  }), "utf8");
+
+  const status = await waitForSubagent(root, job.id, tmux, {
+    afterTurnIndex: 0,
+    intervalMs: 1,
+    timeoutMs: 100,
+    onUpdate() {
+      calls += 1;
+      if (calls === 1) {
+        const resultPath = join(jobDir, "turns", "001-result.md");
+        writeFileSync(resultPath, "done", "utf8");
+        writeFileSync(join(jobDir, "turns", "turns.json"), JSON.stringify({
+          version: 1,
+          turns: [{ index: 1, status: "waiting", startedAt: 2, completedAt: 3, resultPath }],
+        }), "utf8");
+      }
+    },
+  });
+
+  assert.equal(status.latestTurn?.index, 1);
+  assert.equal(status.result, "done");
+}));
+
+test("waitForSubagent returns stopped sessions without waiting for a new turn", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-wait-stopped-test-"));
+  const tmux: TmuxExecutor = async (args) => {
+    if (args[0] === "has-session") throw new Error("missing");
+    return { stdout: "", stderr: "" };
+  };
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+
+  const status = await waitForSubagent(root, job.id, tmux, { afterTurnIndex: 1, intervalMs: 1, timeoutMs: 100 });
+
+  assert.equal(status.status, "stopped");
+}));
+
+test("waitForSubagent timeout leaves child alive", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-wait-timeout-test-"));
+  const calls: string[][] = [];
+  const tmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  };
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+
+  await assert.rejects(() => waitForSubagent(root, job.id, tmux, { afterTurnIndex: 0, intervalMs: 1, timeoutMs: 1 }), /Timed out/);
+  assert.equal(calls.some((args) => args[0] === "kill-session"), false);
 }));
 
 test("cancelSubagent kills tmux and marks job stopped", async () => withNoAgentHub(async () => {

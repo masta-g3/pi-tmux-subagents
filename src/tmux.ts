@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 
 export interface CommandResult {
@@ -51,6 +52,17 @@ export async function capturePane(tmux: TmuxExecutor, sessionName: string): Prom
     return result.stdout.trimEnd();
   } catch {
     return undefined;
+  }
+}
+
+export async function sendMessage(tmux: TmuxExecutor, sessionName: string, message: string): Promise<void> {
+  const bufferName = `pi-tmux-subagents-${randomUUID()}`;
+  await tmux(["set-buffer", "-b", bufferName, "--", message]);
+  try {
+    await tmux(["paste-buffer", "-b", bufferName, "-t", sessionName]);
+    await tmux(["send-keys", "-t", sessionName, "Enter"]);
+  } finally {
+    await tmux(["delete-buffer", "-b", bufferName]);
   }
 }
 

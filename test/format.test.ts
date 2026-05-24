@@ -42,6 +42,13 @@ test("formatStatus renders compact done summary with attach and output paths", (
   assert.match(output, /   stop: tmux_subagent\({ action: "stop", childId: "child-123" }\)/);
 });
 
+test("formatStatus renders persistent waiting sessions as idle", () => {
+  const output = formatStatus(status({ job: { ...status().job, autoStopOnComplete: false } }));
+
+  assert.match(output, /^tmux subagent scout\n ✓ scout · idle · 2m39s/m);
+  assert.match(output, /   ⎿  Ready/);
+});
+
 test("formatStatus shows auto-stopped completion without manual stop hint", () => {
   const output = formatStatus(status({ autoStopped: true }));
 

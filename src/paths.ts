@@ -31,6 +31,18 @@ export function resultPath(root: string, id: string): string {
   return join(jobDir(root, id), "result.md");
 }
 
+export function turnsDir(root: string, id: string): string {
+  return join(jobDir(root, id), "turns");
+}
+
+export function turnsPath(root: string, id: string): string {
+  return join(turnsDir(root, id), "turns.json");
+}
+
+export function turnResultPath(root: string, id: string, index: number): string {
+  return join(turnsDir(root, id), `${String(index).padStart(3, "0")}-result.md`);
+}
+
 export function agentSystemPath(root: string, id: string): string {
   return join(jobDir(root, id), "agent-system.md");
 }

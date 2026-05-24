@@ -4,14 +4,17 @@ import { formatStatus } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
-import { autoStopCompletedSubagent, cancelSubagent, getSubagentStatus, launchSubagent, waitForSubagent } from "./run.js";
+import { autoStopCompletedSubagent, cancelSubagent, getSubagentStatus, launchSubagent, sendSubagentMessage, waitForSubagent } from "./run.js";
 import { loadJobs } from "./state.js";
 import type { AgentScope } from "./types.js";
 
 type ToolParams = {
-  action?: "list" | "get" | "status" | "cancel" | "stop";
+  action?: "list" | "get" | "status" | "cancel" | "stop" | "send" | "wait";
   agent?: string;
   task?: string;
+  message?: string;
+  wait?: boolean;
+  timeoutMs?: number;
   background?: boolean;
   childId?: string;
   id?: string;
@@ -33,9 +36,12 @@ function refreshParentStatus() {
 const TmuxSubagentParams = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop"], description: "Management action. Omit to launch an agent. stop is an alias for cancel." },
+    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop", "send", "wait"], description: "Management action. Omit to launch an agent. stop is an alias for cancel." },
     agent: { type: "string", description: "Agent name for launch/get." },
     task: { type: "string", description: "Task for launch." },
+    message: { type: "string", description: "Message to send for action=send." },
+    wait: { type: "boolean", description: "For action=send, wait for the next completed turn before returning. Default false." },
+    timeoutMs: { type: "number", description: "Optional timeout for action=send with wait=true or action=wait." },
     background: { type: "boolean", description: "Return immediately after spawning the tmux child. Default false." },
     childId: { type: "string", description: "Child job ID or unique prefix for status/cancel." },
     id: { type: "string", description: "Alias for childId." },
@@ -114,6 +120,38 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         return text(formatStatus(status), status);
       }
 
+      if (params.action === "send") {
+        const id = params.childId ?? params.id;
+        if (!id) return text("Missing childId for send action.", undefined, true);
+        if (!params.message) return text("Missing message for send action.", undefined, true);
+        try {
+          const before = await getSubagentStatus(root, id);
+          let status = await sendSubagentMessage(root, before.job.id, params.message);
+          if (params.wait) {
+            status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
+          }
+          activeJobs.set(status.job.id, { agentName: status.job.agentName, status: status.status });
+          refreshParentStatus();
+          return text(formatStatus(status), status, status.status === "error");
+        } catch (error) {
+          return text(error instanceof Error ? error.message : String(error), undefined, true);
+        }
+      }
+
+      if (params.action === "wait") {
+        const id = params.childId ?? params.id;
+        if (!id) return text("Missing childId for wait action.", undefined, true);
+        try {
+          const before = await getSubagentStatus(root, id);
+          const status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
+          activeJobs.set(status.job.id, { agentName: status.job.agentName, status: status.status });
+          refreshParentStatus();
+          return text(formatStatus(status), status, status.status === "error");
+        } catch (error) {
+          return text(error instanceof Error ? error.message : String(error), undefined, true);
+        }
+      }
+
       if (params.action === "cancel" || params.action === "stop") {
         const id = params.childId ?? params.id;
         if (!id) return text(`Missing childId for ${params.action} action.`, undefined, true);
@@ -123,7 +161,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         return text(`Stopped ${job.id} (${job.tmuxSession}).`, job);
       }
 
-      if (!params.agent || !params.task) return text("Missing agent or task. Provide both to launch, or set action to list/get/status/cancel/stop.", undefined, true);
+      if (!params.agent || !params.task) return text("Missing agent or task. Provide both to launch, or set action to list/get/status/cancel/stop/send/wait.", undefined, true);
       const agent = findAgent(cwd, params.agent, scope);
       if (!agent) return text(`Unknown agent: ${params.agent}`, { available: discoverAgents(cwd, scope).agents.map((a) => a.name) }, true);
       const currentDepth = Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;

@@ -58,11 +58,27 @@ export interface TmuxSubagentHeartbeat {
   seenRunning?: boolean;
 }
 
+export interface TmuxSubagentTurn {
+  index: number;
+  status: "running" | "waiting" | "error";
+  startedAt: number;
+  completedAt?: number;
+  resultPath: string;
+  messagePreview?: string;
+}
+
+export interface TmuxSubagentTurnsRegistry {
+  version: 1;
+  turns: TmuxSubagentTurn[];
+}
+
 export interface SubagentStatusResult {
   job: TmuxSubagentJob;
   status: TmuxSubagentStatus;
   heartbeat?: TmuxSubagentHeartbeat;
   result?: string;
+  latestResult?: string;
+  latestTurn?: TmuxSubagentTurn;
   preview?: string;
   autoStopped?: boolean;
   autoStopError?: string;

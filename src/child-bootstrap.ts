@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { heartbeatPath } from "./paths.js";
-import type { TmuxSubagentHeartbeat } from "./types.js";
+import { heartbeatPath, turnResultPath, turnsPath } from "./paths.js";
+import type { TmuxSubagentHeartbeat, TmuxSubagentTurnsRegistry } from "./types.js";
 
 type PiContext = { cwd: string };
 type MessageLike = { role?: string; content?: unknown };
@@ -40,16 +40,33 @@ function isTextPart(part: unknown): part is { type: string; text: string } {
   return typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string";
 }
 
-async function writeResultIfMissing(messages: MessageLike[] | undefined): Promise<void> {
-  const resultPath = process.env.PI_SUBAGENT_RESULT_PATH;
-  const result = finalAssistantText(messages);
-  if (!resultPath || !result) return;
-  await mkdir(dirname(resultPath), { recursive: true });
+async function readTurns(path: string): Promise<TmuxSubagentTurnsRegistry> {
   try {
-    await writeFile(resultPath, `${result}\n`, { encoding: "utf8", flag: "wx" });
+    const registry = JSON.parse(await readFile(path, "utf8")) as TmuxSubagentTurnsRegistry;
+    if (registry.version === 1 && Array.isArray(registry.turns)) return registry;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  return { version: 1, turns: [] };
+}
+
+async function writeTurnResult(stateRoot: string, jobId: string, resultPath: string, messages: MessageLike[] | undefined): Promise<void> {
+  const result = finalAssistantText(messages);
+  if (!result) return;
+
+  const registryPath = turnsPath(stateRoot, jobId);
+  const registry = await readTurns(registryPath);
+  const index = Math.max(0, ...registry.turns.map((turn) => turn.index)) + 1;
+  const now = Date.now();
+  const path = turnResultPath(stateRoot, jobId, index);
+
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${result}\n`, "utf8");
+  await writeFile(resultPath, `${result}\n`, "utf8");
+  await writeJson(registryPath, {
+    version: 1,
+    turns: [...registry.turns, { index, status: "waiting", startedAt: now, completedAt: now, resultPath: path }],
+  });
 }
 
 export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
@@ -111,9 +128,10 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
   pi.on("agent_end", async (event, ctx) => {
     let message: string | undefined;
     try {
-      await writeResultIfMissing((event as { messages?: MessageLike[] }).messages);
+      const resultPath = process.env.PI_SUBAGENT_RESULT_PATH;
+      if (resultPath) await writeTurnResult(stateRoot, jobId, resultPath, (event as { messages?: MessageLike[] }).messages);
     } catch (error) {
-      message = `Could not write result.md: ${error instanceof Error ? error.message : String(error)}`;
+      message = `Could not write result: ${error instanceof Error ? error.message : String(error)}`;
     }
     await heartbeat("waiting", ctx as PiContext, message);
   });

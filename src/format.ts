@@ -26,7 +26,9 @@ function snippet(text: string | undefined, maxLines = 8): string[] {
 }
 
 export function formatStatus(status: SubagentStatusResult): string {
-  const presentation = STATUS_PRESENTATION[status.status];
+  const presentation = status.status === "waiting" && status.job.autoStopOnComplete === false
+    ? { glyph: "✓", label: "idle", title: "Ready" }
+    : STATUS_PRESENTATION[status.status];
   const elapsed = formatDuration((status.heartbeat?.updatedAt ?? status.job.updatedAt) - status.job.createdAt);
   const result = snippet(status.result);
   const preview = result.length ? [] : snippet(status.preview);
@@ -44,7 +46,7 @@ export function formatStatus(status: SubagentStatusResult): string {
   lines.push(
     `   tmux: ${status.job.tmuxSession}`,
     `   attach: tmux attach-session -t ${status.job.tmuxSession}`,
-    `   output: ${status.job.resultPath}`,
+    `   output: ${status.latestTurn?.resultPath ?? status.job.resultPath}`,
   );
   if (status.autoStopped) {
     lines.push("   auto-stopped after completion");

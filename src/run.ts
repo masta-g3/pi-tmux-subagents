@@ -6,10 +6,10 @@ import { mkdirSync } from "node:fs";
 import { detectAgentHubMirror, mirroredTmuxSessionName, mirrorJobToAgentHub, removeMirroredJob, updateMirroredJobStatus } from "./pi-agent-hub-adapter.js";
 import { buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
 import { TMUX_SESSION_PREFIX } from "./names.js";
-import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot } from "./paths.js";
+import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot, turnsPath } from "./paths.js";
 import { resolveJob, updateJob, upsertJob } from "./state.js";
-import { capturePane, execTmux, killSession, newTmuxSession, sessionExists, type TmuxExecutor } from "./tmux.js";
-import type { AgentConfig, SubagentStatusResult, TmuxSubagentHeartbeat, TmuxSubagentJob, TmuxSubagentStatus } from "./types.js";
+import { capturePane, execTmux, killSession, newTmuxSession, sendMessage, sessionExists, type TmuxExecutor } from "./tmux.js";
+import type { AgentConfig, SubagentStatusResult, TmuxSubagentHeartbeat, TmuxSubagentJob, TmuxSubagentStatus, TmuxSubagentTurnsRegistry } from "./types.js";
 
 export interface LaunchSubagentInput {
   stateRoot?: string;
@@ -25,6 +25,9 @@ export interface WaitOptions {
   signal?: AbortSignal;
   onUpdate?: (status: SubagentStatusResult) => void;
   intervalMs?: number;
+  timeoutMs?: number;
+  afterTurnIndex?: number;
+  cancelOnAbort?: boolean;
 }
 
 function childBootstrapPath(): string {
@@ -62,6 +65,17 @@ async function readOptional(path: string): Promise<string | undefined> {
   }
 }
 
+async function readTurns(root: string, id: string): Promise<TmuxSubagentTurnsRegistry | undefined> {
+  try {
+    const registry = JSON.parse(await readFile(turnsPath(root, id), "utf8")) as TmuxSubagentTurnsRegistry;
+    if (registry.version !== 1 || !Array.isArray(registry.turns)) throw new Error(`Unsupported turns registry: ${turnsPath(root, id)}`);
+    return registry;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSubagentJob> {
   const root = input.stateRoot ?? defaultStateRoot();
   const tmux = input.tmux ?? execTmux;
@@ -81,7 +95,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     resultPath: resultPath(root, id),
     createdAt: now,
     updatedAt: now,
-    autoStopOnComplete: input.autoStopOnComplete || undefined,
+    autoStopOnComplete: input.autoStopOnComplete,
   };
 
   const promptFiles = await writePromptFiles(root, job, input.agent, input.task);
@@ -138,7 +152,10 @@ export async function getSubagentStatus(
 ): Promise<SubagentStatusResult> {
   const job = await resolveJob(root, idOrPrefix);
   const heartbeat = await readHeartbeat(root, job.id);
-  const result = await readOptional(resultPath(root, job.id));
+  const turns = await readTurns(root, job.id);
+  const latestTurn = turns?.turns.at(-1);
+  const latestResult = latestTurn ? await readOptional(latestTurn.resultPath) : undefined;
+  const result = latestResult ?? await readOptional(resultPath(root, job.id));
   const exists = await sessionExists(tmux, job.tmuxSession);
   const preview = exists ? await capturePane(tmux, job.tmuxSession) : undefined;
   const status = exists ? effectiveStatus(job, heartbeat) : "stopped";
@@ -146,7 +163,20 @@ export async function getSubagentStatus(
     const updated = await updateJob(root, job.id, (existing) => ({ ...existing, status, updatedAt: Date.now() }));
     await updateMirroredJobStatus(updated, status);
   }
-  return { job: { ...job, status }, status, heartbeat, result, preview };
+  return { job: { ...job, status }, status, heartbeat, result, latestResult, latestTurn, preview };
+}
+
+export async function sendSubagentMessage(
+  root: string,
+  idOrPrefix: string,
+  message: string,
+  tmux: TmuxExecutor = execTmux,
+): Promise<SubagentStatusResult> {
+  const status = await getSubagentStatus(root, idOrPrefix, tmux);
+  if (status.status === "stopped") throw new Error(`Cannot send to stopped subagent: ${status.job.id}`);
+  if (status.status === "starting" || status.status === "running") throw new Error(`Cannot send to busy subagent ${status.job.id}; wait until it is idle.`);
+  await sendMessage(tmux, status.job.tmuxSession, message);
+  return getSubagentStatus(root, status.job.id, tmux);
 }
 
 export async function cancelSubagent(
@@ -193,14 +223,18 @@ export async function waitForSubagent(
   options: WaitOptions = {},
 ): Promise<SubagentStatusResult> {
   const intervalMs = options.intervalMs ?? 1000;
+  const started = Date.now();
   while (true) {
     if (options.signal?.aborted) {
-      await cancelSubagent(root, id, tmux);
-      throw new Error("Subagent launch aborted");
+      if (options.cancelOnAbort ?? true) await cancelSubagent(root, id, tmux);
+      throw new Error("Subagent wait aborted");
     }
+    if (options.timeoutMs !== undefined && Date.now() - started > options.timeoutMs) throw new Error(`Timed out waiting for subagent ${id}`);
     const status = await getSubagentStatus(root, id, tmux);
     options.onUpdate?.(status);
-    if (["waiting", "stopped", "error"].includes(status.status)) return status;
+    if (["stopped", "error"].includes(status.status)) return status;
+    const turnComplete = options.afterTurnIndex === undefined || (status.latestTurn?.index ?? 0) > options.afterTurnIndex;
+    if (status.status === "waiting" && turnComplete) return status;
     await sleep(intervalMs);
   }
 }
