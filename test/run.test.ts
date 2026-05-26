@@ -214,6 +214,38 @@ test("autoStopCompletedSubagent removes mirrored pi-agent-hub rows after clean c
   assert.equal(existsSync(hubHeartbeat), false);
 }));
 
+test("cancelSubagent cascades to nested child jobs and removes hub mirror rows", async () => withAgentHub(async (hubDir) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-cascade-cancel-test-"));
+  const calls: string[][] = [];
+  const tmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  };
+  await writeFile(join(hubDir, "registry.json"), JSON.stringify({
+    version: 1,
+    sessions: [{ id: "main-1", title: "main", cwd: root, group: "default", tmuxSession: "pi-agent-hub-main", status: "running", createdAt: 1, updatedAt: 1 }],
+  }), "utf8");
+  await mkdir(join(hubDir, "heartbeats"), { recursive: true });
+
+  process.env.PI_AGENT_HUB_SESSION_ID = "main-1";
+  const parent = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Parent", background: true, autoStopOnComplete: false, tmux });
+  process.env.PI_AGENT_HUB_SESSION_ID = parent.id;
+  const child = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Child", background: true, autoStopOnComplete: true, tmux });
+  await writeFile(join(hubDir, "heartbeats", `${parent.id}.json`), JSON.stringify({ managedSessionId: parent.id, state: "waiting" }), "utf8");
+  await writeFile(join(hubDir, "heartbeats", `${child.id}.json`), JSON.stringify({ managedSessionId: child.id, state: "waiting" }), "utf8");
+
+  await cancelSubagent(root, parent.id, tmux);
+
+  const registry = JSON.parse(await readFile(join(hubDir, "registry.json"), "utf8"));
+  const jobs = await loadJobs(root);
+  assert.deepEqual(registry.sessions.map((session: { id: string }) => session.id), ["main-1"]);
+  assert.equal(jobs.jobs.find((job) => job.id === parent.id)?.status, "stopped");
+  assert.equal(jobs.jobs.find((job) => job.id === child.id)?.status, "stopped");
+  assert.equal(existsSync(join(hubDir, "heartbeats", `${parent.id}.json`)), false);
+  assert.equal(existsSync(join(hubDir, "heartbeats", `${child.id}.json`)), false);
+  assert.deepEqual(calls.filter((args) => args[0] === "kill-session").map((args) => args.at(-1)), [child.tmuxSession, parent.tmuxSession]);
+}));
+
 test("autoStopCompletedSubagent returns result and warning when stop fails", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-fail-test-"));
   const tmux: TmuxExecutor = async (args) => {

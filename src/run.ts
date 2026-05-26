@@ -3,11 +3,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
-import { detectAgentHubMirror, mirroredTmuxSessionName, mirrorJobToAgentHub, removeMirroredJob, updateMirroredJobStatus } from "./pi-agent-hub-adapter.js";
+import { detectAgentHubMirror, mirroredTmuxSessionName, mirrorJobToAgentHub, removeMirroredJob, removeMirroredJobs, updateMirroredJobStatus } from "./pi-agent-hub-adapter.js";
 import { buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
 import { TMUX_SESSION_PREFIX } from "./names.js";
 import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot, turnsPath } from "./paths.js";
-import { resolveJob, updateJob, upsertJob } from "./state.js";
+import { loadJobs, resolveJob, updateJob, updateJobs, upsertJob } from "./state.js";
 import { capturePane, execTmux, killSession, newTmuxSession, sendMessage, sessionExists, type TmuxExecutor } from "./tmux.js";
 import type { AgentConfig, SubagentStatusResult, TmuxSubagentHeartbeat, TmuxSubagentJob, TmuxSubagentStatus, TmuxSubagentTurnsRegistry } from "./types.js";
 
@@ -184,11 +184,45 @@ export async function cancelSubagent(
   idOrPrefix: string,
   tmux: TmuxExecutor = execTmux,
 ): Promise<TmuxSubagentJob> {
-  const job = await resolveJob(root, idOrPrefix);
-  await killSession(tmux, job.tmuxSession);
-  const updated = await updateJob(root, job.id, (existing) => ({ ...existing, status: "stopped", updatedAt: Date.now() }));
-  await updateMirroredJobStatus(updated, "stopped");
-  return updated;
+  const target = await resolveJob(root, idOrPrefix);
+  const registry = await loadJobs(root);
+  const jobs = jobSubtree(registry.jobs, target.id);
+  for (const job of jobs.slice().reverse()) {
+    if (await sessionExists(tmux, job.tmuxSession)) await killSession(tmux, job.tmuxSession);
+  }
+
+  const stoppedAt = Date.now();
+  let stoppedTarget: TmuxSubagentJob | undefined;
+  const ids = new Set(jobs.map((job) => job.id));
+  const updatedRegistry = await updateJobs(root, (latest) => ({
+    ...latest,
+    jobs: latest.jobs.map((job) => {
+      if (!ids.has(job.id)) return job;
+      const stopped = { ...job, status: "stopped" as const, updatedAt: stoppedAt };
+      if (job.id === target.id) stoppedTarget = stopped;
+      return stopped;
+    }),
+  }));
+  stoppedTarget ??= updatedRegistry.jobs.find((job) => job.id === target.id);
+  await removeMirroredJobs(jobs);
+  return stoppedTarget!;
+}
+
+function jobSubtree(jobs: TmuxSubagentJob[], rootId: string): TmuxSubagentJob[] {
+  const byParent = new Map<string, TmuxSubagentJob[]>();
+  for (const job of jobs) {
+    if (!job.parentId) continue;
+    const children = byParent.get(job.parentId) ?? [];
+    children.push(job);
+    byParent.set(job.parentId, children);
+  }
+  const root = jobs.find((job) => job.id === rootId);
+  if (!root) return [];
+  const subtree: TmuxSubagentJob[] = [root];
+  for (let index = 0; index < subtree.length; index += 1) {
+    subtree.push(...(byParent.get(subtree[index]!.id) ?? []));
+  }
+  return subtree;
 }
 
 export async function autoStopCompletedSubagent(

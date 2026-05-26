@@ -76,16 +76,21 @@ export async function updateMirroredJobStatus(job: TmuxSubagentJob, status: stri
 }
 
 export async function removeMirroredJob(job: TmuxSubagentJob): Promise<void> {
+  await removeMirroredJobs([job]);
+}
+
+export async function removeMirroredJobs(jobs: TmuxSubagentJob[]): Promise<void> {
   const hubDir = process.env.PI_AGENT_HUB_DIR;
-  if (!hubDir) return;
+  if (!hubDir || jobs.length === 0) return;
   const registryPath = join(hubDir, "registry.json");
   if (!existsSync(registryPath)) return;
+  const ids = new Set(jobs.map((job) => job.id));
   await withRegistryLock(hubDir, async () => {
     const registry = JSON.parse(await readFile(registryPath, "utf8")) as RegistryLike;
-    const sessions = registry.sessions.filter((session) => session.id !== job.id);
+    const sessions = registry.sessions.filter((session) => !ids.has(session.id));
     await writeJsonAtomic(registryPath, { ...registry, sessions });
   });
-  await rm(join(hubDir, "heartbeats", `${job.id}.json`), { force: true });
+  await Promise.all([...ids].map((id) => rm(join(hubDir, "heartbeats", `${id}.json`), { force: true })));
 }
 
 function createMirroredRow(job: TmuxSubagentJob, mirror: AgentHubMirrorContext): ManagedSessionLike {
