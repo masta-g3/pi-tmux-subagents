@@ -13,6 +13,7 @@ function status(overrides: Partial<SubagentStatusResult> = {}): SubagentStatusRe
       cwd: "/repo",
       tmuxSession: "pi-agent-hub-child-123",
       status: "waiting",
+      model: "openai/gpt-5",
       resultPath: "/tmp/jobs/child-123/result.md",
       createdAt: 1_000,
       updatedAt: 160_000,
@@ -37,6 +38,7 @@ test("formatStatus renders compact done summary with attach and output paths", (
   assert.match(output, /   ⎿  Done/);
   assert.match(output, /      Changed src\/index\.ts/);
   assert.match(output, /   tmux: pi-agent-hub-child-123/);
+  assert.match(output, /   model: openai\/gpt-5/);
   assert.match(output, /   attach: tmux attach-session -t pi-agent-hub-child-123/);
   assert.match(output, /   output: \/tmp\/jobs\/child-123\/result\.md/);
   assert.match(output, /   stop: tmux_subagent\({ action: "stop", childId: "child-123" }\)/);
@@ -76,11 +78,28 @@ test("formatStatus prefers result and truncates long snippets", () => {
   assert.doesNotMatch(output, /Pane preview/);
 });
 
-test("formatStatus shows pane preview when result is empty", () => {
+test("formatStatus shows task and useful pane preview when result is empty", () => {
   const output = formatStatus(status({ status: "running", result: "", preview: "working\nreading files" }));
 
   assert.match(output, /^tmux subagent scout\n ⟳ scout · running · 2m39s/m);
   assert.match(output, /   ⎿  Running/);
+  assert.match(output, /      Task:\n      Inspect auth/);
   assert.match(output, /      Pane preview:/);
   assert.match(output, /      working/);
+});
+
+test("formatStatus suppresses generic Pi startup pane preview", () => {
+  const output = formatStatus(status({
+    status: "running",
+    result: "",
+    preview: `pi v0.75.4
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
+  }));
+
+  assert.match(output, /      Task:\n      Inspect auth/);
+  assert.doesNotMatch(output, /Pane preview/);
+  assert.doesNotMatch(output, /Pi can explain/);
 });

@@ -40,7 +40,7 @@ function colorStatusLine(line: string, index: number, status: SubagentStatusResu
   if (index === 0) return theme.fg("muted", line);
   if (index === 1) return line.replace(/^ (\S+) (.+?) · (.+)$/, (_match, glyph: string, name: string, rest: string) => ` ${theme.fg(color, glyph)} ${theme.fg("toolTitle", theme.bold(name))} ${theme.fg("muted", `· ${rest}`)}`);
   if (line.startsWith("   ⎿")) return line.replace("⎿", theme.fg("muted", "⎿")).replace(/(Done|Ready|Running|Starting|Stopped|Error)$/, (text) => theme.fg(color, text));
-  if (line.trim() === "Pane preview:") return `      ${theme.fg("muted", "Pane preview:")}`;
+  if (line.trim() === "Task:" || line.trim() === "Pane preview:") return `      ${theme.fg("muted", line.trim())}`;
   if (line.startsWith("      ")) return `      ${theme.fg("toolOutput", line.slice(6))}`;
   if (line.startsWith("   ")) return colorMetadataLine(line, theme);
   return line;

@@ -25,14 +25,30 @@ function snippet(text: string | undefined, maxLines = 8): string[] {
   return lines;
 }
 
+function usefulPanePreview(text: string | undefined): string | undefined {
+  const lines = text?.split(/\r?\n/) ?? [];
+  const useful = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^pi v\d+\.\d+\.\d+/.test(trimmed)) return false;
+    if (/escape interrupt .*\/ commands/.test(trimmed)) return false;
+    if (/^Press ctrl\+o to show full startup help/.test(trimmed)) return false;
+    if (/^Pi can explain its own features/.test(trimmed)) return false;
+    if (/^Ask it how to use or extend Pi\.$/.test(trimmed)) return false;
+    return true;
+  });
+  return useful.join("\n");
+}
+
 export function formatStatus(status: SubagentStatusResult): string {
   const presentation = status.status === "waiting" && status.job.autoStopOnComplete === false
     ? { glyph: "✓", label: "idle", title: "Ready" }
     : STATUS_PRESENTATION[status.status];
   const elapsed = formatDuration((status.heartbeat?.updatedAt ?? status.job.updatedAt) - status.job.createdAt);
   const result = snippet(status.result);
-  const preview = result.length ? [] : snippet(status.preview);
-  const error = result.length || preview.length ? [] : snippet(status.job.error);
+  const task = result.length ? [] : snippet(status.job.taskPreview, 4);
+  const preview = result.length ? [] : snippet(usefulPanePreview(status.preview));
+  const error = result.length || task.length || preview.length ? [] : snippet(status.job.error);
   const lines = [
     `tmux subagent ${status.job.agentName}`,
     ` ${presentation.glyph} ${status.job.agentName} · ${presentation.label} · ${elapsed}`,
@@ -40,11 +56,15 @@ export function formatStatus(status: SubagentStatusResult): string {
   ];
 
   if (result.length) lines.push(...result.map((line) => `      ${line}`));
-  else if (preview.length) lines.push("      Pane preview:", ...preview.map((line) => `      ${line}`));
-  else if (error.length) lines.push(...error.map((line) => `      ${line}`));
+  else {
+    if (task.length) lines.push("      Task:", ...task.map((line) => `      ${line}`));
+    if (preview.length) lines.push("      Pane preview:", ...preview.map((line) => `      ${line}`));
+    if (error.length) lines.push(...error.map((line) => `      ${line}`));
+  }
 
   lines.push(
     `   tmux: ${status.job.tmuxSession}`,
+    ...(status.job.model ? [`   model: ${status.job.model}`] : []),
     `   attach: tmux attach-session -t ${status.job.tmuxSession}`,
     `   output: ${status.latestTurn?.resultPath ?? status.job.resultPath}`,
   );
