@@ -59,7 +59,7 @@ export async function sendMessage(tmux: TmuxExecutor, sessionName: string, messa
   const bufferName = `pi-tmux-subagents-${randomUUID()}`;
   await tmux(["set-buffer", "-b", bufferName, "--", message]);
   try {
-    await tmux(["paste-buffer", "-b", bufferName, "-t", sessionName]);
+    await tmux(["paste-buffer", "-p", "-r", "-b", bufferName, "-t", sessionName]);
     await tmux(["send-keys", "-t", sessionName, "Enter"]);
   } finally {
     await tmux(["delete-buffer", "-b", bufferName]);

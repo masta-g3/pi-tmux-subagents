@@ -41,6 +41,35 @@ test("launchSubagent creates standalone job and tmux session", async () => withN
   assert.match(calls[0]?.at(-1) ?? "", /--extension/);
 }));
 
+test("launchSubagent passes nested subagent policy to child sessions", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-nested-launch-test-"));
+  const calls: string[][] = [];
+  const tmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  };
+
+  const job = await launchSubagent({
+    stateRoot: root,
+    cwd: root,
+    agent,
+    task: "Review auth",
+    background: true,
+    allowNestedSubagents: true,
+    nestedAgentAllowlist: ["code-critic", "plan-critic"],
+    maxNestedDepth: 1,
+    tmux,
+  });
+
+  const command = calls[0]?.at(-1) ?? "";
+  assert.equal(job.allowNestedSubagents, true);
+  assert.deepEqual(job.nestedAgentAllowlist, ["code-critic", "plan-critic"]);
+  assert.equal(job.maxNestedDepth, 1);
+  assert.match(command, /PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST='code-critic,plan-critic'/);
+  assert.match(command, /PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH='1'/);
+  assert.match(command, /'--tools' 'tmux_subagent'/);
+}));
+
 test("launchSubagent persists auto-stop preference", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-launch-test-"));
   const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
@@ -290,7 +319,7 @@ test("autoStopCompletedSubagent leaves non-completed jobs alive", async () => wi
   assert.notEqual(calls.at(-1)?.[0], "kill-session");
 }));
 
-test("sendSubagentMessage pastes messages into idle live sessions", async () => withNoAgentHub(async () => {
+test("sendSubagentMessage bracket-pastes multiline messages into idle live sessions", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-send-test-"));
   const calls: string[][] = [];
   const tmux: TmuxExecutor = async (args) => {
@@ -316,7 +345,7 @@ test("sendSubagentMessage pastes messages into idle live sessions", async () => 
   assert.match(bufferName ?? "", /^pi-tmux-subagents-/);
   assert.deepEqual(sendCalls, [
     ["set-buffer", "-b", bufferName, "--", "hello 'there'\nsecond line"],
-    ["paste-buffer", "-b", bufferName, "-t", job.tmuxSession],
+    ["paste-buffer", "-p", "-r", "-b", bufferName, "-t", job.tmuxSession],
     ["send-keys", "-t", job.tmuxSession, "Enter"],
     ["delete-buffer", "-b", bufferName],
   ]);

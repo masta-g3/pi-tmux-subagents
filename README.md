@@ -75,6 +75,7 @@ tmux_subagent({ action: "get", agent: "scout" })
 tmux_subagent({ agent: "scout", task: "Inspect auth flow", background: true })
 tmux_subagent({ agent: "code-critic", task: "Review these files" }) // auto-stops after clean completion by default
 tmux_subagent({ agent: "scout", task: "Keep alive for follow-up", autoStopOnComplete: false })
+tmux_subagent({ agent: "worker", task: "Review with approved specialists", allowNestedSubagents: true, nestedAgentAllowlist: ["code-critic", "plan-critic"] })
 tmux_subagent({ action: "send", childId: "abc123", message: "Now check edge cases.", wait: true })
 tmux_subagent({ action: "wait", childId: "abc123", timeoutMs: 600000 })
 tmux_subagent({ action: "status", childId: "abc123" })
@@ -83,9 +84,11 @@ tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 
 Child sessions auto-stop after clean completion by default so completed subagents do not clutter tmux or `pi-agent-hub` dashboards. Pass `autoStopOnComplete: false` when you want to inspect, attach, or send follow-up messages after completion, then use `action: "stop"` when done. Auto-stop only applies after clean completion; failed or interrupted sessions stay alive for inspection. Background jobs auto-stop when a later `status` call observes clean completion.
 
-Persistent children support generic follow-up turns through `action: "send"`. By default `send` returns after pasting the message into the live child; pass `wait: true` to wait for the next completed turn. `action: "wait"` waits for a running child to return to an idle/completed state and supports `timeoutMs`; timeouts leave the child alive for later inspection or stopping.
+Persistent children support generic follow-up turns through `action: "send"`. By default `send` returns after pasting the message into the live child; pass `wait: true` to wait for the next completed turn. Multiline messages are bracket-pasted with newlines preserved, then submitted once. `action: "wait"` waits for a running child to return to an idle/completed state and supports `timeoutMs`; timeouts leave the child alive for later inspection or stopping.
 
 Each completed child turn writes a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling.
+
+Nested tmux subagents are disabled by default. Set `allowNestedSubagents: true` plus `nestedAgentAllowlist` to expose `tmux_subagent` inside the child for explicitly requested specialist agents; nested children do not receive nested-launch permission by default. Use `maxNestedDepth` to cap allowed child launch depth.
 
 Foreground runs and explicit status calls render a compact parent-session summary:
 

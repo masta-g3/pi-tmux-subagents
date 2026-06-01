@@ -18,6 +18,9 @@ export interface LaunchSubagentInput {
   task: string;
   background: boolean;
   autoStopOnComplete?: boolean;
+  allowNestedSubagents?: boolean;
+  nestedAgentAllowlist?: string[];
+  maxNestedDepth?: number;
   tmux?: TmuxExecutor;
 }
 
@@ -90,12 +93,15 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     cwd: input.cwd,
     tmuxSession,
     status: "starting",
-    parentId: mirror?.parentId ?? process.env.PI_TMUX_SUBAGENTS_PARENT_ID,
+    parentId: mirror?.parentId ?? process.env.PI_TMUX_SUBAGENTS_JOB_ID ?? process.env.PI_TMUX_SUBAGENTS_PARENT_ID,
     model: input.agent.model,
     resultPath: resultPath(root, id),
     createdAt: now,
     updatedAt: now,
     autoStopOnComplete: input.autoStopOnComplete,
+    allowNestedSubagents: input.allowNestedSubagents || undefined,
+    nestedAgentAllowlist: input.allowNestedSubagents ? input.nestedAgentAllowlist ?? [] : undefined,
+    maxNestedDepth: input.allowNestedSubagents ? input.maxNestedDepth ?? 2 : undefined,
   };
 
   const promptFiles = await writePromptFiles(root, job, input.agent, input.task);
@@ -109,6 +115,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     taskPath: promptFiles.taskPath,
     agentSystemPath: promptFiles.agentSystemPath,
     childBootstrapPath: childBootstrapPath(),
+    allowNestedSubagents: input.allowNestedSubagents,
   });
   const env: Record<string, string | undefined> = {
     PI_TMUX_SUBAGENTS_JOB_ID: id,
@@ -118,6 +125,8 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     PI_SUBAGENT_TASK_PREVIEW: job.taskPreview,
     PI_SUBAGENT_RESULT_PATH: job.resultPath,
     PI_SUBAGENT_DEPTH: String(Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) + 1),
+    PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST: input.allowNestedSubagents ? (input.nestedAgentAllowlist ?? []).join(",") : "",
+    PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH: input.allowNestedSubagents ? String(input.maxNestedDepth ?? 2) : "",
     PI_AGENT_HUB_DIR: "",
     PI_AGENT_HUB_SESSION_ID: "",
     PI_AGENT_HUB_PARENT_ID: "",

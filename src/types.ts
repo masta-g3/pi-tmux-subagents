@@ -41,6 +41,9 @@ export interface TmuxSubagentJob {
   updatedAt: number;
   error?: string;
   autoStopOnComplete?: boolean;
+  allowNestedSubagents?: boolean;
+  nestedAgentAllowlist?: string[];
+  maxNestedDepth?: number;
 }
 
 export interface TmuxSubagentsRegistry {

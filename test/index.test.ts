@@ -10,10 +10,16 @@ function isolatePiStateEnv(agentDir: string): () => void {
   const oldStateEnv = process.env.PI_TMUX_SUBAGENTS_DIR;
   const oldHubDir = process.env.PI_AGENT_HUB_DIR;
   const oldHubId = process.env.PI_AGENT_HUB_SESSION_ID;
+  const oldNestedAllowlist = process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST;
+  const oldNestedDepth = process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH;
+  const oldTmuxJobId = process.env.PI_TMUX_SUBAGENTS_JOB_ID;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   delete process.env.PI_TMUX_SUBAGENTS_DIR;
   delete process.env.PI_AGENT_HUB_DIR;
   delete process.env.PI_AGENT_HUB_SESSION_ID;
+  delete process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST;
+  delete process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH;
+  delete process.env.PI_TMUX_SUBAGENTS_JOB_ID;
   return () => {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
@@ -23,6 +29,12 @@ function isolatePiStateEnv(agentDir: string): () => void {
     else process.env.PI_AGENT_HUB_DIR = oldHubDir;
     if (oldHubId === undefined) delete process.env.PI_AGENT_HUB_SESSION_ID;
     else process.env.PI_AGENT_HUB_SESSION_ID = oldHubId;
+    if (oldNestedAllowlist === undefined) delete process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST;
+    else process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST = oldNestedAllowlist;
+    if (oldNestedDepth === undefined) delete process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH;
+    else process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH = oldNestedDepth;
+    if (oldTmuxJobId === undefined) delete process.env.PI_TMUX_SUBAGENTS_JOB_ID;
+    else process.env.PI_TMUX_SUBAGENTS_JOB_ID = oldTmuxJobId;
   };
 }
 
@@ -85,6 +97,16 @@ test("tmux_subagent exposes persistent send and wait actions", () => {
   assert.equal(tool.parameters.properties.timeoutMs.type, "number");
 });
 
+test("tmux_subagent exposes nested launch controls", () => {
+  let tool: any;
+  extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+  assert.equal(tool.parameters.properties.allowNestedSubagents.type, "boolean");
+  assert.equal(tool.parameters.properties.allowNestedSubagents.default, false);
+  assert.equal(tool.parameters.properties.nestedAgentAllowlist.type, "array");
+  assert.equal(tool.parameters.properties.maxNestedDepth.default, 2);
+});
+
 test("tmux_subagent exposes runtime auto-stop option enabled by default", () => {
   let tool: any;
   extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
@@ -135,7 +157,103 @@ test("tmux_subagent renders status with active theme tokens", () => {
   assert.match(rendered, /<dim>stop:<\/dim> <muted>tmux_subagent/);
 });
 
-test("tmux_subagent rejects recursive launches past agent maxDepth", async () => {
+test("tmux_subagent rejects disallowed nested agents", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-nested-allowlist-test-"));
+  const agentDir = join(root, "agent", "agents");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "scout.md"), `---
+name: scout
+description: Scout
+tools: none
+---
+Scout prompt.
+`);
+
+  const restorePiEnv = isolatePiStateEnv(join(root, "agent"));
+  const oldDepth = process.env.PI_SUBAGENT_DEPTH;
+  process.env.PI_SUBAGENT_DEPTH = "1";
+  process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST = "code-critic";
+  process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH = "1";
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { agent: "scout", task: "try nested" }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Nested agent scout is not allowed/);
+  } finally {
+    restorePiEnv();
+    if (oldDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
+    else process.env.PI_SUBAGENT_DEPTH = oldDepth;
+  }
+});
+
+test("tmux_subagent rejects nested launches beyond max depth", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-nested-depth-test-"));
+  const agentDir = join(root, "agent", "agents");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "code-critic.md"), `---
+name: code-critic
+description: Critic
+tools: none
+---
+Critic prompt.
+`);
+
+  const restorePiEnv = isolatePiStateEnv(join(root, "agent"));
+  const oldDepth = process.env.PI_SUBAGENT_DEPTH;
+  process.env.PI_SUBAGENT_DEPTH = "1";
+  process.env.PI_TMUX_SUBAGENTS_JOB_ID = "child-1";
+  process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST = "code-critic";
+  process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH = "1";
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { agent: "code-critic", task: "review" }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /subagent depth 2/);
+  } finally {
+    restorePiEnv();
+    if (oldDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
+    else process.env.PI_SUBAGENT_DEPTH = oldDepth;
+  }
+});
+
+test("tmux_subagent rejects nested child management for jobs it did not launch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-nested-manage-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id: "parent-job", agentName: "scout", taskPreview: "Parent job", cwd: root, tmuxSession: "pi-agent-hub-parent", status: "running", resultPath: join(state, "jobs", "parent-job", "result.md"), createdAt: 1, updatedAt: 1 }],
+  }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  const oldDepth = process.env.PI_SUBAGENT_DEPTH;
+  process.env.PI_SUBAGENT_DEPTH = "1";
+  process.env.PI_TMUX_SUBAGENTS_JOB_ID = "child-1";
+  process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST = "code-critic";
+  process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH = "2";
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { action: "status", childId: "parent-job" }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /only manage jobs they launched/);
+  } finally {
+    restorePiEnv();
+    if (oldDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
+    else process.env.PI_SUBAGENT_DEPTH = oldDepth;
+  }
+});
+
+test("tmux_subagent rejects nested launches when not enabled", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-test-"));
   const agentDir = join(root, "agent", "agents");
   mkdirSync(agentDir, { recursive: true });
@@ -158,7 +276,7 @@ Scout prompt.
     const result = await tool.execute("call", { agent: "scout", task: "try nested" }, undefined, undefined, { cwd: root });
 
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /maxDepth is 0/);
+    assert.match(result.content[0].text, /Nested tmux_subagent launches are not enabled/);
   } finally {
     restorePiEnv();
     if (oldDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;

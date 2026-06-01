@@ -21,6 +21,9 @@ type ToolParams = {
   agentScope?: AgentScope;
   cwd?: string;
   autoStopOnComplete?: boolean;
+  allowNestedSubagents?: boolean;
+  nestedAgentAllowlist?: string[];
+  maxNestedDepth?: number;
 };
 
 type PiContext = { cwd: string; ui?: { setStatus?: (key: string, text: string | undefined) => void } };
@@ -47,7 +50,10 @@ const TmuxSubagentParams = {
     id: { type: "string", description: "Alias for childId." },
     agentScope: { type: "string", enum: ["user", "project", "both"], description: "Agent discovery scope. Default user." },
     cwd: { type: "string", description: "Working directory for the child. Defaults to parent cwd." },
-    autoStopOnComplete: { type: "boolean", default: true, description: "Stop the tmux session automatically after a clean completion. Default true; set false to keep sessions alive for follow-up. Failures and attention-needed sessions stay alive." }
+    autoStopOnComplete: { type: "boolean", default: true, description: "Stop the tmux session automatically after a clean completion. Default true; set false to keep sessions alive for follow-up. Failures and attention-needed sessions stay alive." },
+    allowNestedSubagents: { type: "boolean", default: false, description: "Expose tmux_subagent inside the child for explicitly approved nested specialist agents. Default false." },
+    nestedAgentAllowlist: { type: "array", items: { type: "string" }, description: "Agent names the child may launch when allowNestedSubagents is true." },
+    maxNestedDepth: { type: "number", default: 2, description: "Maximum PI_SUBAGENT_DEPTH allowed for launched nested tmux_subagents. Default 2." }
   }
 } as const;
 
@@ -57,6 +63,30 @@ function text(content: string, details?: unknown, isError?: boolean) {
 
 export function resolveAutoStopOnComplete(value: boolean | undefined): boolean {
   return value ?? true;
+}
+
+function nestedAllowlist(): string[] {
+  return (process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST ?? "").split(",").map((agent) => agent.trim()).filter(Boolean);
+}
+
+function maxNestedDepth(): number {
+  return Number.parseInt(process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH ?? "", 10) || 0;
+}
+
+function currentDepth(): number {
+  return Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;
+}
+
+function nestedSessionPolicy(): { depth: number; childId?: string; allowlist: string[] } {
+  return { depth: currentDepth(), childId: process.env.PI_TMUX_SUBAGENTS_JOB_ID, allowlist: nestedAllowlist() };
+}
+
+function nestedDisabledMessage(): string {
+  return "Nested tmux_subagent launches are not enabled in this child session.";
+}
+
+function nestedCanAccessJob(job: { parentId?: string }, childId: string | undefined): boolean {
+  return Boolean(childId && job.parentId === childId);
 }
 
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
@@ -81,17 +111,22 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
       const scope = params.agentScope ?? "user";
       const root = stateRoot();
+      const nestedPolicy = nestedSessionPolicy();
+      const inNestedSession = nestedPolicy.depth > 0;
 
       if (params.action === "list") {
+        if (inNestedSession && !nestedPolicy.allowlist.length) return text(nestedDisabledMessage(), undefined, true);
         const discovery = discoverAgents(cwd, scope);
-        const lines = discovery.agents.length
-          ? discovery.agents.map((agent) => `${agent.name} (${agent.source}): ${agent.description}`).join("\n")
+        const agents = inNestedSession ? discovery.agents.filter((agent) => nestedPolicy.allowlist.includes(agent.name)) : discovery.agents;
+        const lines = agents.length
+          ? agents.map((agent) => `${agent.name} (${agent.source}): ${agent.description}`).join("\n")
           : "No agents found.";
-        return text(lines, discovery);
+        return text(lines, { ...discovery, agents });
       }
 
       if (params.action === "get") {
         if (!params.agent) return text("Missing agent for get action.", undefined, true);
+        if (inNestedSession && !nestedPolicy.allowlist.includes(params.agent)) return text(nestedPolicy.allowlist.length ? `Nested agent ${params.agent} is not allowed. Allowed agents: ${nestedPolicy.allowlist.join(", ")}.` : nestedDisabledMessage(), undefined, true);
         const agent = findAgent(cwd, params.agent, scope);
         if (!agent) return text(`Unknown agent: ${params.agent}`, { available: discoverAgents(cwd, scope).agents.map((a) => a.name) }, true);
         return text([
@@ -111,9 +146,11 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         const id = params.childId ?? params.id;
         if (!id) {
           const jobs = await loadJobs(root);
-          return text(jobs.jobs.map((job) => `${job.id.slice(0, 12)} ${job.status} ${job.agentName}: ${job.taskPreview}`).join("\n") || "No tmux subagent jobs.", jobs);
+          const visibleJobs = inNestedSession ? jobs.jobs.filter((job) => nestedCanAccessJob(job, nestedPolicy.childId)) : jobs.jobs;
+          return text(visibleJobs.map((job) => `${job.id.slice(0, 12)} ${job.status} ${job.agentName}: ${job.taskPreview}`).join("\n") || "No tmux subagent jobs.", { ...jobs, jobs: visibleJobs });
         }
         const initialStatus = await getSubagentStatus(root, id);
+        if (inNestedSession && !nestedCanAccessJob(initialStatus.job, nestedPolicy.childId)) return text(`Nested child sessions can only manage jobs they launched.`, undefined, true);
         const status = initialStatus.job.autoStopOnComplete ? await autoStopCompletedSubagent(root, initialStatus) : initialStatus;
         activeJobs.set(status.job.id, { agentName: status.job.agentName, status: status.status });
         refreshParentStatus();
@@ -126,6 +163,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         if (!params.message) return text("Missing message for send action.", undefined, true);
         try {
           const before = await getSubagentStatus(root, id);
+          if (inNestedSession && !nestedCanAccessJob(before.job, nestedPolicy.childId)) return text(`Nested child sessions can only manage jobs they launched.`, undefined, true);
           let status = await sendSubagentMessage(root, before.job.id, params.message);
           if (params.wait) {
             status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
@@ -143,6 +181,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         if (!id) return text("Missing childId for wait action.", undefined, true);
         try {
           const before = await getSubagentStatus(root, id);
+          if (inNestedSession && !nestedCanAccessJob(before.job, nestedPolicy.childId)) return text(`Nested child sessions can only manage jobs they launched.`, undefined, true);
           const status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
           activeJobs.set(status.job.id, { agentName: status.job.agentName, status: status.status });
           refreshParentStatus();
@@ -155,6 +194,10 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       if (params.action === "cancel" || params.action === "stop") {
         const id = params.childId ?? params.id;
         if (!id) return text(`Missing childId for ${params.action} action.`, undefined, true);
+        if (inNestedSession) {
+          const before = await getSubagentStatus(root, id);
+          if (!nestedCanAccessJob(before.job, nestedPolicy.childId)) return text(`Nested child sessions can only manage jobs they launched.`, undefined, true);
+        }
         const job = await cancelSubagent(root, id);
         activeJobs.set(job.id, { agentName: job.agentName, status: job.status });
         refreshParentStatus();
@@ -164,11 +207,29 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       if (!params.agent || !params.task) return text("Missing agent or task. Provide both to launch, or set action to list/get/status/cancel/stop/send/wait.", undefined, true);
       const agent = findAgent(cwd, params.agent, scope);
       if (!agent) return text(`Unknown agent: ${params.agent}`, { available: discoverAgents(cwd, scope).agents.map((a) => a.name) }, true);
-      const currentDepth = Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;
-      if (currentDepth > agent.maxDepth) return text(`Agent ${agent.name} cannot launch at subagent depth ${currentDepth}; maxDepth is ${agent.maxDepth}.`, undefined, true);
+      const nestedLaunch = inNestedSession;
+      if (nestedLaunch) {
+        if (!nestedPolicy.allowlist.length) return text(nestedDisabledMessage(), undefined, true);
+        if (!nestedPolicy.allowlist.includes(agent.name)) return text(`Nested agent ${agent.name} is not allowed. Allowed agents: ${nestedPolicy.allowlist.join(", ")}.`, undefined, true);
+        const launchedDepth = nestedPolicy.depth + 1;
+        const depthLimit = maxNestedDepth();
+        if (launchedDepth > depthLimit) return text(`Nested agent ${agent.name} cannot launch at subagent depth ${launchedDepth}; maxNestedDepth is ${depthLimit}.`, undefined, true);
+      } else if (nestedPolicy.depth > agent.maxDepth) {
+        return text(`Agent ${agent.name} cannot launch at subagent depth ${nestedPolicy.depth}; maxDepth is ${agent.maxDepth}.`, undefined, true);
+      }
 
       const autoStopOnComplete = resolveAutoStopOnComplete(params.autoStopOnComplete);
-      const job = await launchSubagent({ stateRoot: root, cwd, agent, task: params.task, background: params.background ?? false, autoStopOnComplete });
+      const job = await launchSubagent({
+        stateRoot: root,
+        cwd,
+        agent,
+        task: params.task,
+        background: params.background ?? false,
+        autoStopOnComplete,
+        allowNestedSubagents: params.allowNestedSubagents && !nestedLaunch,
+        nestedAgentAllowlist: params.nestedAgentAllowlist,
+        maxNestedDepth: params.maxNestedDepth,
+      });
       activeJobs.set(job.id, { agentName: job.agentName, status: job.status });
       refreshParentStatus();
       if (params.background) {

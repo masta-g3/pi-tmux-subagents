@@ -56,6 +56,15 @@ test("writePromptFiles writes child boundary and task contract under jobs/id", a
   assert.match(task, /control-plane output, not a project file change/);
 });
 
+test("writePromptFiles includes nested subagent boundary when enabled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-prompt-nested-test-"));
+  const nestedJob = { ...job(root), allowNestedSubagents: true, nestedAgentAllowlist: ["code-critic", "plan-critic"] };
+  const paths = await writePromptFiles(root, nestedJob, agent, "Review carefully");
+
+  assert.match(await readFile(paths.agentSystemPath, "utf8"), /Nested subagent launches are allowed only/);
+  assert.match(await readFile(paths.taskPath, "utf8"), /Allowed nested agents: code-critic, plan-critic/);
+});
+
 test("buildPiArgs maps agent config to Pi CLI args", () => {
   const args = buildPiArgs({
     agent,
@@ -72,4 +81,16 @@ test("buildPiArgs maps agent config to Pi CLI args", () => {
     "--system-prompt", "/tmp/system.md",
     "@/tmp/task.md",
   ]);
+});
+
+test("buildPiArgs exposes tmux_subagent when nested launches are allowed", () => {
+  const args = buildPiArgs({
+    agent,
+    taskPath: "/tmp/task.md",
+    agentSystemPath: "/tmp/system.md",
+    childBootstrapPath: "/tmp/bootstrap.js",
+    allowNestedSubagents: true,
+  });
+
+  assert.ok(args.includes("read,bash,tmux_subagent"));
 });
