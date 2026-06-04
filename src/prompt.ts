@@ -34,6 +34,7 @@ Context:
 - Parent session id: ${job.parentId ?? "unknown"}
 - Child session id: ${job.id}
 - Agent: ${job.agentName}
+- Dashboard label: ${job.displayName ?? job.agentName}
 - Result path: ${job.resultPath}
 ${nested}
 Output:

@@ -113,7 +113,8 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
         updatedAt: now,
         kind: process.env.PI_AGENT_HUB_KIND,
         parentId: process.env.PI_AGENT_HUB_PARENT_ID,
-        agentName: process.env.PI_SUBAGENT_AGENT,
+        agentName: process.env.PI_SUBAGENT_DISPLAY_NAME ?? process.env.PI_SUBAGENT_AGENT,
+        agentType: process.env.PI_SUBAGENT_AGENT,
         taskPreview: process.env.PI_SUBAGENT_TASK_PREVIEW,
         resultPath: process.env.PI_SUBAGENT_RESULT_PATH,
       });

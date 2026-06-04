@@ -21,6 +21,7 @@ interface ManagedSessionLike {
   kind?: "main" | "subagent";
   parentId?: string;
   agentName?: string;
+  agentType?: string;
   taskPreview?: string;
   resultPath?: string;
 }
@@ -95,9 +96,10 @@ export async function removeMirroredJobs(jobs: TmuxSubagentJob[]): Promise<void>
 
 function createMirroredRow(job: TmuxSubagentJob, mirror: AgentHubMirrorContext): ManagedSessionLike {
   const now = Date.now();
+  const name = job.displayName ?? job.agentName;
   return {
     id: job.id,
-    title: job.agentName,
+    title: name,
     cwd: job.cwd,
     group: mirror.parentGroup,
     tmuxSession: job.tmuxSession,
@@ -106,7 +108,8 @@ function createMirroredRow(job: TmuxSubagentJob, mirror: AgentHubMirrorContext):
     updatedAt: now,
     kind: "subagent",
     parentId: mirror.parentId,
-    agentName: job.agentName,
+    agentName: name,
+    agentType: job.agentName,
     taskPreview: job.taskPreview,
     resultPath: job.resultPath,
   };

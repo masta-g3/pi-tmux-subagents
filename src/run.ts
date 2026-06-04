@@ -17,6 +17,7 @@ export interface LaunchSubagentInput {
   agent: AgentConfig;
   task: string;
   background: boolean;
+  displayName?: string;
   autoStopOnComplete?: boolean;
   allowNestedSubagents?: boolean;
   nestedAgentAllowlist?: string[];
@@ -31,6 +32,20 @@ export interface WaitOptions {
   timeoutMs?: number;
   afterTurnIndex?: number;
   cancelOnAbort?: boolean;
+}
+
+export interface WaitAnyOptions extends Omit<WaitOptions, "afterTurnIndex"> {
+  jobFilter?: (job: TmuxSubagentJob) => boolean;
+}
+
+export interface CleanupCompletedOptions {
+  jobFilter?: (job: TmuxSubagentJob) => boolean;
+}
+
+export interface CleanupCompletedResult {
+  autoStopped: SubagentStatusResult[];
+  idlePersistent: SubagentStatusResult[];
+  errors: Array<{ job: TmuxSubagentJob; error: string }>;
 }
 
 function childBootstrapPath(): string {
@@ -89,6 +104,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
   const job: TmuxSubagentJob = {
     id,
     agentName: input.agent.name,
+    displayName: input.displayName,
     taskPreview: taskPreview(input.task),
     cwd: input.cwd,
     tmuxSession,
@@ -122,6 +138,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     PI_TMUX_SUBAGENTS_DIR: root,
     PI_TMUX_SUBAGENTS_PARENT_ID: job.parentId,
     PI_SUBAGENT_AGENT: input.agent.name,
+    PI_SUBAGENT_DISPLAY_NAME: job.displayName,
     PI_SUBAGENT_TASK_PREVIEW: job.taskPreview,
     PI_SUBAGENT_RESULT_PATH: job.resultPath,
     PI_SUBAGENT_DEPTH: String(Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) + 1),
@@ -278,6 +295,62 @@ export async function waitForSubagent(
     if (["stopped", "error"].includes(status.status)) return status;
     const turnComplete = options.afterTurnIndex === undefined || (status.latestTurn?.index ?? 0) > options.afterTurnIndex;
     if (status.status === "waiting" && turnComplete) return status;
+    await sleep(intervalMs);
+  }
+}
+
+export async function cleanupCompletedSubagents(
+  root: string,
+  tmux: TmuxExecutor = execTmux,
+  options: CleanupCompletedOptions = {},
+): Promise<CleanupCompletedResult> {
+  const result: CleanupCompletedResult = { autoStopped: [], idlePersistent: [], errors: [] };
+  const candidates = (await loadJobs(root)).jobs
+    .filter((job) => options.jobFilter?.(job) ?? true)
+    .filter((job) => job.status !== "stopped" && job.status !== "error");
+
+  for (const job of candidates) {
+    try {
+      const status = await getSubagentStatus(root, job.id, tmux);
+      if (status.status !== "waiting") continue;
+      if (status.job.autoStopOnComplete === false) result.idlePersistent.push(status);
+      else {
+        const stopped = await autoStopCompletedSubagent(root, status, tmux);
+        if (stopped.autoStopped) result.autoStopped.push(stopped);
+        else result.errors.push({ job, error: stopped.autoStopError ?? stopped.mirrorCleanupError ?? "auto-stop did not complete" });
+      }
+    } catch (error) {
+      result.errors.push({ job, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  return result;
+}
+
+export async function waitForAnySubagent(
+  root: string,
+  tmux: TmuxExecutor = execTmux,
+  options: WaitAnyOptions = {},
+): Promise<SubagentStatusResult> {
+  const candidates = (await loadJobs(root)).jobs
+    .filter((job) => options.jobFilter?.(job) ?? true)
+    .filter((job) => job.status === "starting" || job.status === "running");
+  if (!candidates.length) throw new Error("No running tmux subagent jobs to wait for.");
+
+  const intervalMs = options.intervalMs ?? 1000;
+  const started = Date.now();
+  while (true) {
+    if (options.signal?.aborted) {
+      if (options.cancelOnAbort ?? true) await Promise.all(candidates.map((job) => cancelSubagent(root, job.id, tmux)));
+      throw new Error("Subagent wait aborted");
+    }
+    if (options.timeoutMs !== undefined && Date.now() - started > options.timeoutMs) throw new Error("Timed out waiting for a tmux subagent to complete");
+
+    for (const job of candidates) {
+      const status = await getSubagentStatus(root, job.id, tmux);
+      options.onUpdate?.(status);
+      if (status.status !== "starting" && status.status !== "running") return status;
+    }
     await sleep(intervalMs);
   }
 }

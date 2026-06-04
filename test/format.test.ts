@@ -51,6 +51,12 @@ test("formatStatus renders persistent waiting sessions as idle", () => {
   assert.match(output, /   ⎿  Ready/);
 });
 
+test("formatStatus prefers displayName when present", () => {
+  const output = formatStatus(status({ job: { ...status().job, displayName: "scout-auth" } }));
+
+  assert.match(output, /^tmux subagent scout-auth\n ✓ scout-auth · done · 2m39s/m);
+});
+
 test("formatStatus shows auto-stopped completion without manual stop hint", () => {
   const output = formatStatus(status({ autoStopped: true }));
 
@@ -63,6 +69,12 @@ test("formatStatus shows auto-stop failure with manual stop hint", () => {
 
   assert.match(output, /   auto-stop failed: tmux session disappeared/);
   assert.match(output, /   stop: tmux_subagent\({ action: "stop", childId: "child-123" }\)/);
+});
+
+test("formatStatus shows subagent hygiene notes", () => {
+  const output = formatStatus(status({ hygieneNote: "2 idle persistent children need stop when no longer needed." }));
+
+  assert.match(output, /   cleanup: 2 idle persistent children need stop when no longer needed\./);
 });
 
 test("formatStatus prefers result and truncates long snippets", () => {

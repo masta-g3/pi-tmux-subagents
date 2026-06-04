@@ -49,9 +49,10 @@ export function formatStatus(status: SubagentStatusResult): string {
   const task = result.length ? [] : snippet(status.job.taskPreview, 4);
   const preview = result.length ? [] : snippet(usefulPanePreview(status.preview));
   const error = result.length || task.length || preview.length ? [] : snippet(status.job.error);
+  const name = status.job.displayName ?? status.job.agentName;
   const lines = [
-    `tmux subagent ${status.job.agentName}`,
-    ` ${presentation.glyph} ${status.job.agentName} · ${presentation.label} · ${elapsed}`,
+    `tmux subagent ${name}`,
+    ` ${presentation.glyph} ${name} · ${presentation.label} · ${elapsed}`,
     `   ⎿  ${presentation.title}`,
   ];
 
@@ -75,5 +76,6 @@ export function formatStatus(status: SubagentStatusResult): string {
     if (status.autoStopError) lines.push(`   auto-stop failed: ${status.autoStopError}`);
     lines.push(`   stop: tmux_subagent({ action: "stop", childId: "${status.job.id}" })`);
   }
+  if (status.hygieneNote) lines.push(`   cleanup: ${status.hygieneNote}`);
   return lines.join("\n");
 }

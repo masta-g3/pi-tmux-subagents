@@ -29,6 +29,7 @@ export type TmuxSubagentStatus = "starting" | "running" | "waiting" | "stopped" 
 export interface TmuxSubagentJob {
   id: string;
   agentName: string;
+  displayName?: string;
   taskPreview: string;
   cwd: string;
   tmuxSession: string;
@@ -86,4 +87,5 @@ export interface SubagentStatusResult {
   autoStopped?: boolean;
   autoStopError?: string;
   mirrorCleanupError?: string;
+  hygieneNote?: string;
 }

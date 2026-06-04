@@ -12,6 +12,7 @@ function isolatePiStateEnv(agentDir: string): () => void {
   const oldHubId = process.env.PI_AGENT_HUB_SESSION_ID;
   const oldNestedAllowlist = process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST;
   const oldNestedDepth = process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH;
+  const oldSubagentDepth = process.env.PI_SUBAGENT_DEPTH;
   const oldTmuxJobId = process.env.PI_TMUX_SUBAGENTS_JOB_ID;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   delete process.env.PI_TMUX_SUBAGENTS_DIR;
@@ -19,6 +20,7 @@ function isolatePiStateEnv(agentDir: string): () => void {
   delete process.env.PI_AGENT_HUB_SESSION_ID;
   delete process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST;
   delete process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH;
+  delete process.env.PI_SUBAGENT_DEPTH;
   delete process.env.PI_TMUX_SUBAGENTS_JOB_ID;
   return () => {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -33,6 +35,8 @@ function isolatePiStateEnv(agentDir: string): () => void {
     else process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST = oldNestedAllowlist;
     if (oldNestedDepth === undefined) delete process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH;
     else process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH = oldNestedDepth;
+    if (oldSubagentDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
+    else process.env.PI_SUBAGENT_DEPTH = oldSubagentDepth;
     if (oldTmuxJobId === undefined) delete process.env.PI_TMUX_SUBAGENTS_JOB_ID;
     else process.env.PI_TMUX_SUBAGENTS_JOB_ID = oldTmuxJobId;
   };
@@ -57,14 +61,14 @@ test("tmux_subagent uses canonical parent status key", async () => {
   }
 });
 
-test("tmux_subagent status reads jobs from canonical default root", async () => {
+test("tmux_subagent status reads jobs from canonical default root and sweeps missing sessions", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-root-test-"));
   const agentDir = join(root, "agent");
   const state = join(agentDir, "pi-tmux-subagents");
   mkdirSync(state, { recursive: true });
   writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
     version: 1,
-    jobs: [{ id: "child-1", agentName: "scout", taskPreview: "Inspect", cwd: root, tmuxSession: "pi-agent-hub-child-1", status: "starting", resultPath: join(state, "jobs", "child-1", "result.md"), createdAt: 1, updatedAt: 1 }],
+    jobs: [{ id: "child-1", agentName: "scout", displayName: "scout-auth", taskPreview: "Inspect", cwd: root, tmuxSession: "pi-agent-hub-child-1", status: "starting", resultPath: join(state, "jobs", "child-1", "result.md"), createdAt: 1, updatedAt: 1 }],
   }, null, 2)}\n`);
 
   const restorePiEnv = isolatePiStateEnv(agentDir);
@@ -74,7 +78,7 @@ test("tmux_subagent status reads jobs from canonical default root", async () => 
 
     const result = await tool.execute("call", { action: "status" }, undefined, undefined, { cwd: root });
 
-    assert.match(result.content[0].text, /child-1 starting scout: Inspect/);
+    assert.match(result.content[0].text, /child-1 stopped scout-auth: Inspect/);
   } finally {
     restorePiEnv();
   }
@@ -94,7 +98,12 @@ test("tmux_subagent exposes persistent send and wait actions", () => {
   assert.ok(tool.parameters.properties.action.enum.includes("send"));
   assert.ok(tool.parameters.properties.action.enum.includes("wait"));
   assert.equal(tool.parameters.properties.message.type, "string");
+  assert.equal(tool.parameters.properties.label.type, "string");
+  assert.match(tool.parameters.properties.label.description, /worker-auth/);
   assert.equal(tool.parameters.properties.timeoutMs.type, "number");
+  assert.match(tool.description, /Prefer background launches/);
+  assert.match(tool.parameters.properties.wait.description, /Prefer false/);
+  assert.match(tool.parameters.properties.childId.description, /omit to return when any active child completes/);
 });
 
 test("tmux_subagent exposes nested launch controls", () => {
