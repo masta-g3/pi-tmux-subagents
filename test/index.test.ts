@@ -42,20 +42,28 @@ function isolatePiStateEnv(agentDir: string): () => void {
   };
 }
 
-test("tmux_subagent uses canonical parent status key", async () => {
+test("tmux_subagent uses canonical parent status and widget keys", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-test-"));
   const restorePiEnv = isolatePiStateEnv(join(root, "agent"));
   try {
     const handlers = new Map<string, Function>();
     const statuses: Array<[string, string | undefined]> = [];
+    const widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]> = [];
     extension({
       registerTool() {},
       on(name: string, handler: Function) { handlers.set(name, handler); },
     } as any);
 
-    await handlers.get("session_start")?.({}, { cwd: process.cwd(), ui: { setStatus: (key: string, text: string | undefined) => statuses.push([key, text]) } });
+    await handlers.get("session_start")?.({}, {
+      cwd: process.cwd(),
+      ui: {
+        setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
+        setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]),
+      },
+    });
 
     assert.deepEqual(statuses, [["pi-tmux-subagents", undefined]]);
+    assert.deepEqual(widgets, [["pi-tmux-subagents", undefined, undefined]]);
   } finally {
     restorePiEnv();
   }
@@ -84,11 +92,73 @@ test("tmux_subagent status reads jobs from canonical default root and sweeps mis
   }
 });
 
+test("tmux_subagent global status hides old stopped jobs unless requested", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-filter-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  mkdirSync(state, { recursive: true });
+  const stoppedJobs = Array.from({ length: 7 }, (_, index) => ({
+    id: `stopped-${index + 1}`,
+    agentName: "scout",
+    taskPreview: `Stopped ${index + 1}`,
+    cwd: root,
+    tmuxSession: `pi-agent-hub-stopped-${index + 1}`,
+    status: "stopped",
+    resultPath: join(state, "jobs", `stopped-${index + 1}`, "result.md"),
+    createdAt: index + 1,
+    updatedAt: index + 1,
+  }));
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [
+      ...stoppedJobs,
+      { id: "error-1", agentName: "scout", taskPreview: "Needs review", cwd: root, tmuxSession: "pi-agent-hub-error-1", status: "error", resultPath: join(state, "jobs", "error-1", "result.md"), createdAt: 20, updatedAt: 20 },
+    ],
+  }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const filtered = await tool.execute("call", { action: "status" }, undefined, undefined, { cwd: root });
+    assert.match(filtered.content[0].text, /error-1 error scout: Needs review/);
+    assert.match(filtered.content[0].text, /stopped-7 stopped scout: Stopped 7/);
+    assert.doesNotMatch(filtered.content[0].text, /stopped-1 stopped scout: Stopped 1/);
+    assert.match(filtered.content[0].text, /2 older stopped children hidden/);
+    assert.match(filtered.content[0].text, /includeStopped: true/);
+    assert.equal(filtered.details.jobs.length, 6);
+
+    const full = await tool.execute("call", { action: "status", includeStopped: true }, undefined, undefined, { cwd: root });
+    assert.match(full.content[0].text, /stopped-1 stopped scout: Stopped 1/);
+    assert.doesNotMatch(full.content[0].text, /older stopped child hidden/);
+    assert.equal(full.details.jobs.length, 8);
+  } finally {
+    restorePiEnv();
+  }
+});
+
 test("tmux_subagent exposes stop as a shutdown alias", () => {
   let tool: any;
   extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
 
   assert.ok(tool.parameters.properties.action.enum.includes("stop"));
+});
+
+test("tmux_subagent registers subagent widget command and shortcut", () => {
+  let command: any;
+  const shortcuts: any[] = [];
+  extension({
+    registerTool() {},
+    on() {},
+    registerCommand(name: string, def: any) { command = { name, ...def }; },
+    registerShortcut(key: string, def: any) { shortcuts.push({ key, ...def }); },
+  } as any);
+
+  assert.equal(command.name, "subagents");
+  assert.match(command.description, /details widget/);
+  assert.deepEqual(shortcuts.map((shortcut) => shortcut.key), ["alt+s", "ctrl+alt+s"]);
+  assert.match(shortcuts[0].description, /details widget/);
 });
 
 test("tmux_subagent exposes persistent send and wait actions", () => {
@@ -100,6 +170,8 @@ test("tmux_subagent exposes persistent send and wait actions", () => {
   assert.equal(tool.parameters.properties.message.type, "string");
   assert.equal(tool.parameters.properties.label.type, "string");
   assert.match(tool.parameters.properties.label.description, /worker-auth/);
+  assert.equal(tool.parameters.properties.includeStopped.type, "boolean");
+  assert.match(tool.parameters.properties.includeStopped.description, /historical/);
   assert.equal(tool.parameters.properties.timeoutMs.type, "number");
   assert.match(tool.description, /Prefer background launches/);
   assert.match(tool.parameters.properties.wait.description, /Prefer false/);
@@ -147,23 +219,24 @@ test("tmux_subagent renders status with active theme tokens", () => {
         cwd: "/repo",
         tmuxSession: "pi-agent-hub-child-123",
         status: "running",
+        model: "openai/gpt-5",
         resultPath: "/tmp/result.md",
-        createdAt: 1_000,
-        updatedAt: 2_000,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
       },
-      heartbeat: { jobId: "child-123", cwd: "/repo", state: "running", stateSince: 1_500, updatedAt: 2_000 },
+      heartbeat: { jobId: "child-123", cwd: "/repo", state: "running", stateSince: 1_500, updatedAt: Date.now(), usage: { input: 1200, output: 300, cacheRead: 0, cacheWrite: 0, totalTokens: 1500, cost: { input: 0.002, output: 0.004, cacheRead: 0, cacheWrite: 0, total: 0.006 } } },
       preview: "## Scope",
     },
   }, { expanded: false, isPartial: true }, theme, {}).render(120).join("\n");
 
   assert.match(rendered, /^<muted>tmux subagent plan-critic<\/muted>/);
-  assert.match(rendered, /<warning>⟳<\/warning> <toolTitle><b>plan-critic<\/b><\/toolTitle>/);
-  assert.match(rendered, /<muted>Pane preview:<\/muted>/);
-  assert.match(rendered, /<toolOutput>## Scope<\/toolOutput>/);
-  assert.match(rendered, /<dim>tmux:<\/dim> <muted>pi-agent-hub-child-123<\/muted>/);
-  assert.match(rendered, /<dim>attach:<\/dim> <mdCode>tmux attach-session -t pi-agent-hub-child-123<\/mdCode>/);
-  assert.match(rendered, /<dim>output:<\/dim> <mdCode>\/tmp\/result\.md<\/mdCode>/);
-  assert.match(rendered, /<dim>stop:<\/dim> <muted>tmux_subagent/);
+  assert.match(rendered, /<warning>⟳<\/warning> <muted>running · 0s · activity 0s ago · 300 out · \$0\.006<\/muted>/);
+  assert.doesNotMatch(rendered, /<dim>model:<\/dim>/);
+  assert.doesNotMatch(rendered, /1\.2k in/);
+  assert.doesNotMatch(rendered, /Pane preview/);
+  assert.doesNotMatch(rendered, /## Scope/);
+  assert.doesNotMatch(rendered, /attach:/);
+  assert.doesNotMatch(rendered, /stop:/);
 });
 
 test("tmux_subagent rejects disallowed nested agents", async () => {

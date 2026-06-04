@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatStatus } from "../src/format.js";
+import { formatStatus, formatSubagentFooterStatus, formatSubagentWidget, formatUserStatus } from "../src/format.js";
 import type { SubagentStatusResult } from "../src/types.js";
 
 function status(overrides: Partial<SubagentStatusResult> = {}): SubagentStatusResult {
@@ -55,6 +55,63 @@ test("formatStatus prefers displayName when present", () => {
   const output = formatStatus(status({ job: { ...status().job, displayName: "scout-auth" } }));
 
   assert.match(output, /^tmux subagent scout-auth\n ✓ scout-auth · done · 2m39s/m);
+});
+
+test("formatUserStatus renders lean active card without operational commands or previews", () => {
+  const output = formatUserStatus(status({
+    status: "running",
+    result: "",
+    preview: "working\nreading files",
+    job: { ...status().job, displayName: "scout-auth", createdAt: Date.now() - 159_000 },
+    heartbeat: {
+      ...status().heartbeat!,
+      updatedAt: Date.now(),
+      usage: { input: 18_200, output: 1_400, cacheRead: 0, cacheWrite: 0, totalTokens: 19_600, cost: { input: 0.05, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.08 } },
+    },
+    hygieneNote: "1 idle persistent child needs stop when no longer needed.",
+  }));
+
+  assert.match(output, /^tmux subagent scout-auth \(scout\)\n ⟳ running · 2m39s · activity 0s ago · 1\.4k out · \$0\.08/m);
+  assert.doesNotMatch(output, /model:/);
+  assert.doesNotMatch(output, /cleanup:/);
+  assert.doesNotMatch(output, /18\.2k in/);
+  assert.doesNotMatch(output, /attach:/);
+  assert.doesNotMatch(output, /stop:/);
+  assert.doesNotMatch(output, /Pane preview/);
+  assert.doesNotMatch(output, /working/);
+});
+
+test("formatUserStatus renders lean terminal card with result basename", () => {
+  const output = formatUserStatus(status({
+    latestTurn: { index: 1, status: "waiting", startedAt: 100_000, completedAt: 160_000, resultPath: "/tmp/jobs/child-123/turns/001-result.md", usage: { input: 5, output: 3_500, cacheRead: 0, cacheWrite: 0, totalTokens: 3_505, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } },
+    usage: { input: 5, output: 3_500, cacheRead: 0, cacheWrite: 0, totalTokens: 3_505, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  }));
+
+  assert.equal(output, [
+    "tmux subagent scout",
+    " ✓ done · 2m39s · 3.5k out · $0",
+    "   ✓ result ready → 001-result.md",
+  ].join("\n"));
+  assert.doesNotMatch(output, /\/tmp\/jobs/);
+});
+
+test("formatSubagentFooterStatus and widget render live observability summary", () => {
+  const running = status({
+    status: "running",
+    job: { ...status().job, displayName: "scout-render", status: "running", autoStopOnComplete: false, createdAt: Date.now() - 159_000 },
+    heartbeat: { ...status().heartbeat!, state: "running", updatedAt: Date.now(), usage: { input: 9_200, output: 1_100, cacheRead: 0, cacheWrite: 0, totalTokens: 10_300, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } } },
+  });
+  const idle = status({
+    job: { ...status().job, id: "child-456", displayName: "scout-cost", autoStopOnComplete: false },
+    usage: { input: 16_700, output: 912, cacheRead: 0, cacheWrite: 0, totalTokens: 17_612, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.02 } },
+  });
+
+  assert.equal(formatSubagentFooterStatus([running, idle]), "subagents: 1 running · 1 idle · $0.03");
+  assert.deepEqual(formatSubagentWidget([running, idle]), [
+    "tmux subagents",
+    "⟳ scout-render  running  2m39s  0s ago  9.2k/1.1k  $0.01",
+    "✓ scout-cost    idle     2m39s  —       16.7k/912  $0.02",
+  ]);
 });
 
 test("formatStatus shows auto-stopped completion without manual stop hint", () => {

@@ -26,6 +26,29 @@ test("child bootstrap writes final assistant text to latest and turn result path
   });
 });
 
+test("child bootstrap records assistant usage on completed turns and heartbeats", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-usage-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+
+  await withChildEnv(root, resultPath, async () => {
+    const handlers = loadBootstrapHandlers();
+
+    await handlers.agent_end?.({ type: "agent_end", messages: [
+      { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 1000, output: 200, cacheRead: 300, cacheWrite: 40, totalTokens: 1540, cost: { input: 0.003, output: 0.003, cacheRead: 0.0003, cacheWrite: 0.00012, total: 0.00642 } } },
+      { role: "assistant", content: [{ type: "text", text: "done again" }], usage: { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 600, cost: { input: 0.0015, output: 0.0015, cacheRead: 0, cacheWrite: 0, total: 0.003 } } },
+    ] } as any, { cwd: root });
+
+    const turns = JSON.parse(await readFile(join(root, "jobs", "child-1", "turns", "turns.json"), "utf8"));
+    assert.deepEqual(turns.turns[0].usage, { input: 1500, output: 300, cacheRead: 300, cacheWrite: 40, totalTokens: 2140, cost: { input: 0.0045, output: 0.0045, cacheRead: 0.0003, cacheWrite: 0.00012, total: 0.00942 } });
+
+    const heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+    assert.equal(heartbeat.usage.totalTokens, 2140);
+    assert.equal(heartbeat.usage.cost.total, 0.00942);
+
+    await handlers.session_shutdown?.({ type: "session_shutdown" } as any, { cwd: root });
+  });
+});
+
 test("child bootstrap records each completed turn and updates the latest result", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-existing-result-test-"));
   const resultPath = join(root, "jobs", "child-1", "result.md");
@@ -97,6 +120,7 @@ async function withChildEnv(root: string, resultPath: string, fn: () => Promise<
     "PI_AGENT_HUB_PARENT_ID",
     "PI_AGENT_HUB_KIND",
     "PI_SUBAGENT_AGENT",
+    "PI_SUBAGENT_DISPLAY_NAME",
     "PI_SUBAGENT_TASK_PREVIEW",
   ];
   for (const key of keys) {

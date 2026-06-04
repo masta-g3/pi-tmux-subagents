@@ -26,6 +26,21 @@ export interface AgentDiscoveryResult {
 
 export type TmuxSubagentStatus = "starting" | "running" | "waiting" | "stopped" | "error";
 
+export interface TmuxSubagentUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+}
+
 export interface TmuxSubagentJob {
   id: string;
   agentName: string;
@@ -60,6 +75,7 @@ export interface TmuxSubagentHeartbeat {
   message?: string;
   updatedAt: number;
   seenRunning?: boolean;
+  usage?: TmuxSubagentUsage;
 }
 
 export interface TmuxSubagentTurn {
@@ -69,6 +85,7 @@ export interface TmuxSubagentTurn {
   completedAt?: number;
   resultPath: string;
   messagePreview?: string;
+  usage?: TmuxSubagentUsage;
 }
 
 export interface TmuxSubagentTurnsRegistry {
@@ -87,5 +104,6 @@ export interface SubagentStatusResult {
   autoStopped?: boolean;
   autoStopError?: string;
   mirrorCleanupError?: string;
+  usage?: TmuxSubagentUsage;
   hygieneNote?: string;
 }

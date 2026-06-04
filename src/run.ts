@@ -189,7 +189,7 @@ export async function getSubagentStatus(
     const updated = await updateJob(root, job.id, (existing) => ({ ...existing, status, updatedAt: Date.now() }));
     await updateMirroredJobStatus(updated, status);
   }
-  return { job: { ...job, status }, status, heartbeat, result, latestResult, latestTurn, preview };
+  return { job: { ...job, status }, status, heartbeat, result, latestResult, latestTurn, preview, usage: heartbeat?.usage ?? latestTurn?.usage };
 }
 
 export async function sendSubagentMessage(

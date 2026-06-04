@@ -1,4 +1,5 @@
-import type { SubagentStatusResult, TmuxSubagentStatus } from "./types.js";
+import { basename } from "node:path";
+import type { SubagentStatusResult, TmuxSubagentStatus, TmuxSubagentUsage } from "./types.js";
 
 const STATUS_PRESENTATION: Record<TmuxSubagentStatus, { glyph: string; label: string; title: string }> = {
   starting: { glyph: "⟳", label: "starting", title: "Starting" },
@@ -14,6 +15,55 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m${String(seconds % 60).padStart(2, "0")}s`;
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+function formatNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(value);
+}
+
+function formatCost(value: number): string {
+  if (value === 0) return "$0";
+  if (value < 0.01) return `$${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+  return `$${value.toFixed(2)}`;
+}
+
+function statusUsage(status: SubagentStatusResult): TmuxSubagentUsage | undefined {
+  return status.usage ?? status.heartbeat?.usage ?? status.latestTurn?.usage;
+}
+
+function formatCompactUsage(status: SubagentStatusResult): string | undefined {
+  const usage = statusUsage(status);
+  if (!usage) return undefined;
+  return `${formatNumber(usage.input)}/${formatNumber(usage.output)} · ${formatCost(usage.cost.total)}`;
+}
+
+function formatCardUsage(status: SubagentStatusResult): string | undefined {
+  const usage = statusUsage(status);
+  if (!usage) return undefined;
+  const tokenText = usage.output > 0 ? `${formatNumber(usage.output)} out` : `${formatNumber(usage.input)} in`;
+  return `${tokenText} · ${formatCost(usage.cost.total)}`;
+}
+
+function lastActivity(status: SubagentStatusResult): string | undefined {
+  if (!status.heartbeat || status.status !== "running" && status.status !== "starting") return undefined;
+  return `${formatDuration(Date.now() - status.heartbeat.updatedAt)} ago`;
+}
+
+function compactName(status: SubagentStatusResult): string {
+  return status.job.displayName ?? status.job.agentName;
+}
+
+function displayName(status: SubagentStatusResult): string {
+  const name = compactName(status);
+  return status.job.displayName && status.job.displayName !== status.job.agentName ? `${name} (${status.job.agentName})` : name;
+}
+
+function presentationFor(status: SubagentStatusResult): { glyph: string; label: string; title: string } {
+  return status.status === "waiting" && status.job.autoStopOnComplete === false
+    ? { glyph: "✓", label: "idle", title: "Ready" }
+    : STATUS_PRESENTATION[status.status];
 }
 
 function snippet(text: string | undefined, maxLines = 8): string[] {
@@ -40,10 +90,89 @@ function usefulPanePreview(text: string | undefined): string | undefined {
   return useful.join("\n");
 }
 
+function statusElapsed(status: SubagentStatusResult): string {
+  return formatDuration((status.heartbeat?.updatedAt ?? status.job.updatedAt) - status.job.createdAt);
+}
+
+function resultBasename(status: SubagentStatusResult): string {
+  return basename(status.latestTurn?.resultPath ?? status.job.resultPath);
+}
+
+export function formatSubagentFooterStatus(statuses: SubagentStatusResult[]): string | undefined {
+  if (!statuses.length) return undefined;
+  const counts = new Map<string, number>();
+  let totalCost = 0;
+  let hasCost = false;
+  for (const status of statuses) {
+    const label = presentationFor(status).label;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+    const usage = statusUsage(status);
+    if (usage) {
+      totalCost += usage.cost.total;
+      hasCost = true;
+    }
+  }
+  const order = ["starting", "running", "idle", "error", "done", "stopped"];
+  const labels = [...order.filter((label) => counts.has(label)), ...[...counts.keys()].filter((label) => !order.includes(label))];
+  const summary = labels.map((label) => `${counts.get(label)} ${label}`).join(" · ");
+  return [`subagents: ${summary}`, hasCost ? formatCost(totalCost) : undefined].filter(Boolean).join(" · ");
+}
+
+export function formatSubagentWidget(statuses: SubagentStatusResult[]): string[] | undefined {
+  if (!statuses.length) return undefined;
+  const rows = statuses.map((status) => {
+    const presentation = presentationFor(status);
+    return {
+      glyph: presentation.glyph,
+      name: compactName(status),
+      state: presentation.label,
+      elapsed: statusElapsed(status),
+      activity: lastActivity(status) ?? "—",
+      usage: formatCompactUsage(status)?.replace(" · ", "  ") ?? "—",
+    };
+  });
+  const nameWidth = Math.max(...rows.map((row) => row.name.length));
+  const stateWidth = Math.max(...rows.map((row) => row.state.length));
+  const elapsedWidth = Math.max(...rows.map((row) => row.elapsed.length));
+  const activityWidth = Math.max(...rows.map((row) => row.activity.length));
+  return [
+    "tmux subagents",
+    ...rows.map((row) => `${row.glyph} ${row.name.padEnd(nameWidth)}  ${row.state.padEnd(stateWidth)}  ${row.elapsed.padEnd(elapsedWidth)}  ${row.activity.padEnd(activityWidth)}  ${row.usage}`),
+  ];
+}
+
+export function formatUserStatusList(statuses: SubagentStatusResult[], hiddenStopped = 0): string {
+  const lines = [
+    "tmux subagents",
+    [formatSubagentFooterStatus(statuses)?.replace(/^subagents: /, "") ?? "0 jobs", hiddenStopped ? `${hiddenStopped} stopped hidden` : undefined].filter(Boolean).join(" · "),
+  ];
+
+  const widget = formatSubagentWidget(statuses)?.slice(1) ?? [];
+  lines.push(...widget.map((line) => ` ${line}`));
+  return lines.join("\n");
+}
+
+export function formatUserStatus(status: SubagentStatusResult): string {
+  const presentation = presentationFor(status);
+  const activity = lastActivity(status);
+  const usage = formatCardUsage(status);
+  const parts = [presentation.label, statusElapsed(status), activity ? `activity ${activity}` : undefined, usage].filter(Boolean);
+  const lines = [
+    `tmux subagent ${displayName(status)}`,
+    ` ${presentation.glyph} ${parts.join(" · ")}`,
+  ];
+
+  if (status.status === "error") {
+    if (status.job.error) lines.push(`   error: ${status.job.error}`);
+    lines.push(`   inspect result → ${resultBasename(status)}`);
+  } else if ((status.status === "waiting" || status.status === "stopped") && (status.latestTurn || status.latestResult || status.result)) {
+    lines.push(`   ✓ result ready → ${resultBasename(status)}`);
+  }
+  return lines.join("\n");
+}
+
 export function formatStatus(status: SubagentStatusResult): string {
-  const presentation = status.status === "waiting" && status.job.autoStopOnComplete === false
-    ? { glyph: "✓", label: "idle", title: "Ready" }
-    : STATUS_PRESENTATION[status.status];
+  const presentation = presentationFor(status);
   const elapsed = formatDuration((status.heartbeat?.updatedAt ?? status.job.updatedAt) - status.job.createdAt);
   const result = snippet(status.result);
   const task = result.length ? [] : snippet(status.job.taskPreview, 4);

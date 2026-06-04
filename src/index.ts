@@ -1,12 +1,12 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
-import { formatStatus } from "./format.js";
+import { formatSubagentFooterStatus, formatSubagentWidget, formatUserStatus } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
 import { autoStopCompletedSubagent, cancelSubagent, cleanupCompletedSubagents, getSubagentStatus, launchSubagent, sendSubagentMessage, waitForAnySubagent, waitForSubagent, type CleanupCompletedResult } from "./run.js";
 import { loadJobs } from "./state.js";
-import type { AgentScope, SubagentStatusResult } from "./types.js";
+import type { AgentScope, SubagentStatusResult, TmuxSubagentJob } from "./types.js";
 
 type ToolParams = {
   action?: "list" | "get" | "status" | "cancel" | "stop" | "send" | "wait";
@@ -17,6 +17,7 @@ type ToolParams = {
   wait?: boolean;
   timeoutMs?: number;
   background?: boolean;
+  includeStopped?: boolean;
   childId?: string;
   id?: string;
   agentScope?: AgentScope;
@@ -27,14 +28,109 @@ type ToolParams = {
   maxNestedDepth?: number;
 };
 
-type PiContext = { cwd: string; ui?: { setStatus?: (key: string, text: string | undefined) => void } };
+type PiContext = {
+  cwd: string;
+  ui?: {
+    theme?: { fg?: (token: any, text: string) => string };
+    setStatus?: (key: string, text: string | undefined) => void;
+    setWidget?: (key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }) => void;
+  };
+};
 
-const activeJobs = new Map<string, { agentName: string; status: string }>();
+const RECENT_STOPPED_STATUS_LIMIT = 5;
+const activeJobs = new Map<string, SubagentStatusResult>();
 let setStatus: ((text: string | undefined) => void) | undefined;
+let setWidget: ((content: string[] | undefined) => void) | undefined;
+let lastStatusText: string | undefined;
+let lastWidgetText: string | undefined;
+let pollTimer: NodeJS.Timeout | undefined;
+let polling = false;
+let pollRoot: string | undefined;
+let widgetExpanded = false;
+
+function visibleStatuses(): SubagentStatusResult[] {
+  return [...activeJobs.values()].filter((status) => {
+    if (status.status === "starting" || status.status === "running" || status.status === "error") return true;
+    return status.status === "waiting" && status.job.autoStopOnComplete === false;
+  });
+}
+
+function hasActiveStatuses(): boolean {
+  return visibleStatuses().some((status) => status.status === "starting" || status.status === "running");
+}
+
+function applyParentUi() {
+  const statuses = visibleStatuses();
+  const footerText = formatSubagentFooterStatus(statuses);
+  const widgetLines = widgetExpanded ? formatSubagentWidget(statuses) : footerText ? [footerText] : undefined;
+  const widgetText = widgetLines?.join("\n");
+
+  if (lastStatusText !== undefined) {
+    setStatus?.(undefined);
+    lastStatusText = undefined;
+  }
+  if (widgetText !== lastWidgetText) {
+    setWidget?.(widgetLines);
+    lastWidgetText = widgetText;
+  }
+}
+
+function trackStatus(status: SubagentStatusResult) {
+  activeJobs.set(status.job.id, status);
+  refreshParentStatus();
+  if (pollRoot) startStatusPolling(pollRoot);
+}
+
+function trackJob(job: TmuxSubagentJob) {
+  trackStatus({ job, status: job.status });
+}
+
+function startStatusPolling(root: string) {
+  if (pollTimer || !hasActiveStatuses()) return;
+  pollTimer = setInterval(async () => {
+    if (polling) return;
+    if (!hasActiveStatuses()) {
+      stopStatusPolling();
+      return;
+    }
+    polling = true;
+    try {
+      const ids = [...activeJobs.keys()];
+      const statuses = await Promise.all(ids.map(async (id) => {
+        const status = await getSubagentStatus(root, id).catch(() => undefined);
+        if (!status) return undefined;
+        return status.job.autoStopOnComplete ? autoStopCompletedSubagent(root, status) : status;
+      }));
+      for (const status of statuses) {
+        if (status) activeJobs.set(status.job.id, status);
+      }
+      refreshParentStatus();
+    } finally {
+      polling = false;
+    }
+  }, 3000);
+  pollTimer.unref?.();
+}
+
+function stopStatusPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = undefined;
+}
 
 function refreshParentStatus() {
-  const active = [...activeJobs.values()].filter((job) => !["waiting", "stopped", "error"].includes(job.status));
-  setStatus?.(active.length ? `subagents: ${active.map((job) => `${job.agentName} ${job.status}`).join(" · ")}` : undefined);
+  applyParentUi();
+  if (!hasActiveStatuses()) stopStatusPolling();
+}
+
+function setWidgetExpanded(value: boolean) {
+  widgetExpanded = value;
+  lastWidgetText = undefined;
+  refreshParentStatus();
+}
+
+function toggleWidgetExpanded() {
+  setWidgetExpanded(!widgetExpanded);
+  return widgetExpanded;
 }
 
 function normalizeDisplayName(value: string | undefined): string | undefined {
@@ -44,6 +140,31 @@ function normalizeDisplayName(value: string | undefined): string | undefined {
 
 function jobDisplayName(job: { agentName: string; displayName?: string }): string {
   return job.displayName ?? job.agentName;
+}
+
+function compareRecentJobs(a: TmuxSubagentJob, b: TmuxSubagentJob): number {
+  return b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id);
+}
+
+function formatJobSummary(job: TmuxSubagentJob): string {
+  return `${job.id.slice(0, 12)} ${job.status} ${jobDisplayName(job)}: ${job.taskPreview}`;
+}
+
+function selectStatusJobs(jobs: TmuxSubagentJob[], includeStopped: boolean): { jobs: TmuxSubagentJob[]; hiddenStopped: number } {
+  const sorted = [...jobs].sort(compareRecentJobs);
+  if (includeStopped) return { jobs: sorted, hiddenStopped: 0 };
+
+  const active = sorted.filter((job) => job.status !== "stopped");
+  const stopped = sorted.filter((job) => job.status === "stopped");
+  const recentStopped = stopped.slice(0, RECENT_STOPPED_STATUS_LIMIT);
+  return { jobs: [...active, ...recentStopped].sort(compareRecentJobs), hiddenStopped: stopped.length - recentStopped.length };
+}
+
+function formatJobsStatus(jobs: TmuxSubagentJob[], includeStopped: boolean): string {
+  const { jobs: selected, hiddenStopped } = selectStatusJobs(jobs, includeStopped);
+  const lines = selected.map(formatJobSummary);
+  if (hiddenStopped > 0) lines.push(`${hiddenStopped} older stopped child${hiddenStopped === 1 ? "" : "ren"} hidden; pass includeStopped: true for full history.`);
+  return lines.join("\n") || "No tmux subagent jobs.";
 }
 
 const TmuxSubagentParams = {
@@ -57,6 +178,7 @@ const TmuxSubagentParams = {
     wait: { type: "boolean", description: "For action=send, wait for the next completed turn before returning. Prefer false unless blocked. Default false." },
     timeoutMs: { type: "number", description: "Optional timeout for action=send with wait=true or action=wait; wait leaves children alive on timeout." },
     background: { type: "boolean", description: "Return immediately after spawning the tmux child. Default false." },
+    includeStopped: { type: "boolean", default: false, description: "For action=status without childId, include all stopped historical jobs. Default false shows active/error jobs plus the 5 most recently stopped jobs." },
     childId: { type: "string", description: "Child job ID or unique prefix. For action=wait, omit to return when any active child completes." },
     id: { type: "string", description: "Alias for childId." },
     agentScope: { type: "string", enum: ["user", "project", "both"], description: "Agent discovery scope. Default user." },
@@ -86,11 +208,11 @@ function cleanupNote(cleanup: CleanupCompletedResult): string | undefined {
 function withCleanupNote(result: ToolTextResult, cleanup: CleanupCompletedResult): ToolTextResult {
   const note = cleanupNote(cleanup);
   if (!note) return result;
-  if (isStatusResult(result.details)) {
+  if (typeof result.details === "object" && result.details !== null) {
     const details = { ...result.details, hygieneNote: note };
-    return text(formatStatus(details), details, result.isError);
+    return isStatusResult(details) ? text(formatUserStatus(details), details, result.isError) : text(result.content[0]?.text ?? "", details, result.isError);
   }
-  return text(`${result.content[0]?.text ?? ""}\n\nSubagent cleanup: ${note}`, result.details, result.isError);
+  return text(result.content[0]?.text ?? "", { details: result.details, hygieneNote: note }, result.isError);
 }
 
 function isStatusResult(value: unknown): value is SubagentStatusResult {
@@ -127,14 +249,47 @@ function nestedCanAccessJob(job: { parentId?: string }, childId: string | undefi
 
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    setStatus = (ctx as PiContext).ui?.setStatus ? (text) => (ctx as PiContext).ui?.setStatus?.(STATUS_KEY, text) : undefined;
+    const ui = (ctx as PiContext).ui;
+    setStatus = ui?.setStatus ? (text) => ui.setStatus?.(STATUS_KEY, text) : undefined;
+    setWidget = ui?.setWidget ? (content) => {
+      if (!content) return ui.setWidget?.(STATUS_KEY, undefined);
+      const lines = ui.theme?.fg ? content.map((line) => ui.theme?.fg?.("muted", line) ?? line) : content;
+      return ui.setWidget?.(STATUS_KEY, lines, { placement: "belowEditor" });
+    } : undefined;
+    lastStatusText = "";
+    lastWidgetText = "";
     refreshParentStatus();
   });
   pi.on("session_shutdown", async () => {
     setStatus?.(undefined);
+    setWidget?.(undefined);
     setStatus = undefined;
+    setWidget = undefined;
+    lastStatusText = undefined;
+    lastWidgetText = undefined;
+    widgetExpanded = false;
+    stopStatusPolling();
     activeJobs.clear();
   });
+
+  pi.registerCommand?.("subagents", {
+    description: "Toggle tmux subagent details widget",
+    handler: async (args, ctx) => {
+      const arg = args.trim().toLowerCase();
+      const expanded = arg === "show" || arg === "on" ? (setWidgetExpanded(true), true) : arg === "hide" || arg === "off" ? (setWidgetExpanded(false), false) : toggleWidgetExpanded();
+      ctx.ui?.notify?.(`Subagent details ${expanded ? "shown" : "hidden"}.`, "info");
+    },
+  });
+
+  const toggleShortcut = {
+    description: "Toggle tmux subagent details widget",
+    handler: async (ctx: ExtensionContext) => {
+      const expanded = toggleWidgetExpanded();
+      ctx.ui?.notify?.(`Subagent details ${expanded ? "shown" : "hidden"}.`, "info");
+    },
+  };
+  pi.registerShortcut?.("alt+s", toggleShortcut);
+  pi.registerShortcut?.("ctrl+alt+s", toggleShortcut);
 
   pi.registerTool({
     name: "tmux_subagent",
@@ -147,6 +302,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
       const scope = params.agentScope ?? "user";
       const root = stateRoot();
+      pollRoot = root;
       const nestedPolicy = nestedSessionPolicy();
       const inNestedSession = nestedPolicy.depth > 0;
       const requestedId = params.childId ?? params.id;
@@ -191,14 +347,15 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         if (!id) {
           const jobs = await loadJobs(root);
           const visibleJobs = inNestedSession ? jobs.jobs.filter((job) => nestedCanAccessJob(job, nestedPolicy.childId)) : jobs.jobs;
-          return reply(visibleJobs.map((job) => `${job.id.slice(0, 12)} ${job.status} ${jobDisplayName(job)}: ${job.taskPreview}`).join("\n") || "No tmux subagent jobs.", { ...jobs, jobs: visibleJobs });
+          const selected = selectStatusJobs(visibleJobs, params.includeStopped ?? false);
+          const statuses = await Promise.all(selected.jobs.map((job) => getSubagentStatus(root, job.id)));
+          return reply(formatJobsStatus(visibleJobs, params.includeStopped ?? false), { ...jobs, jobs: selected.jobs, statuses, hiddenStopped: selected.hiddenStopped });
         }
         const initialStatus = await getSubagentStatus(root, id);
         if (inNestedSession && !nestedCanAccessJob(initialStatus.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
         const status = initialStatus.job.autoStopOnComplete ? await autoStopCompletedSubagent(root, initialStatus) : initialStatus;
-        activeJobs.set(status.job.id, { agentName: jobDisplayName(status.job), status: status.status });
-        refreshParentStatus();
-        return reply(formatStatus(status), status);
+        trackStatus(status);
+        return reply(formatUserStatus(status), status);
       }
 
       if (params.action === "send") {
@@ -212,9 +369,8 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           if (params.wait) {
             status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
           }
-          activeJobs.set(status.job.id, { agentName: jobDisplayName(status.job), status: status.status });
-          refreshParentStatus();
-          return reply(formatStatus(status), status, status.status === "error");
+          trackStatus(status);
+          return reply(formatUserStatus(status), status, status.status === "error");
         } catch (error) {
           return reply(error instanceof Error ? error.message : String(error), undefined, true);
         }
@@ -236,9 +392,8 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
               jobFilter: inNestedSession ? (job) => nestedCanAccessJob(job, nestedPolicy.childId) : undefined,
             });
           }
-          activeJobs.set(status.job.id, { agentName: jobDisplayName(status.job), status: status.status });
-          refreshParentStatus();
-          return reply(formatStatus(status), status, status.status === "error");
+          trackStatus(status);
+          return reply(formatUserStatus(status), status, status.status === "error");
         } catch (error) {
           return reply(error instanceof Error ? error.message : String(error), undefined, true);
         }
@@ -252,8 +407,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           if (!nestedCanAccessJob(before.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
         }
         const job = await cancelSubagent(root, id);
-        activeJobs.set(job.id, { agentName: jobDisplayName(job), status: job.status });
-        refreshParentStatus();
+        trackJob(job);
         return reply(`Stopped ${job.id} (${job.tmuxSession}).`, job);
       }
 
@@ -284,30 +438,24 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         maxNestedDepth: params.maxNestedDepth,
         displayName: normalizeDisplayName(params.label),
       });
-      activeJobs.set(job.id, { agentName: jobDisplayName(job), status: job.status });
-      refreshParentStatus();
+      trackJob(job);
       if (params.background) {
         return reply([
           `Launched ${jobDisplayName(job)}${job.displayName ? ` (${job.agentName})` : ""} as ${job.id}`,
-          `tmux: ${job.tmuxSession}`,
-          `Result: ${job.resultPath}`,
-          `Attach: tmux attach-session -t ${job.tmuxSession}`,
-          autoStopOnComplete ? "Auto-stop: enabled when status observes clean completion" : `Stop when done: tmux_subagent({ action: "stop", childId: "${job.id}" })`,
+          `state: ${job.status}`,
         ].join("\n"), job);
       }
 
       const waited = await waitForSubagent(root, job.id, undefined, {
         signal,
         onUpdate: onUpdate ? (status) => {
-          activeJobs.set(status.job.id, { agentName: jobDisplayName(status.job), status: status.status });
-          refreshParentStatus();
-          onUpdate(text(formatStatus(status), status));
+          trackStatus(status);
+          onUpdate(text(formatUserStatus(status), status));
         } : undefined,
       });
       const final = autoStopOnComplete ? await autoStopCompletedSubagent(root, waited) : waited;
-      activeJobs.set(final.job.id, { agentName: jobDisplayName(final.job), status: final.status });
-      refreshParentStatus();
-      return reply(formatStatus(final), final, final.status === "error");
+      trackStatus(final);
+      return reply(formatUserStatus(final), final, final.status === "error");
     },
   });
 }

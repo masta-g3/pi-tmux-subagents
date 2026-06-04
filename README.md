@@ -79,11 +79,13 @@ tmux_subagent({ agent: "worker", task: "Review with approved specialists", allow
 tmux_subagent({ action: "send", childId: "abc123", message: "Now check edge cases.", wait: true })
 tmux_subagent({ action: "wait", childId: "abc123", timeoutMs: 600000 }) // only when blocked
 tmux_subagent({ action: "wait", timeoutMs: 600000 }) // wait for any active child to complete
+tmux_subagent({ action: "status" }) // active/error jobs plus recent stopped jobs
+tmux_subagent({ action: "status", includeStopped: true }) // full historical list
 tmux_subagent({ action: "status", childId: "abc123" })
 tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 ```
 
-Child sessions auto-stop after clean completion by default so completed subagents do not clutter tmux or `pi-agent-hub` dashboards. Pass `autoStopOnComplete: false` when you want to inspect, attach, or send follow-up messages after completion, then use `action: "stop"` when done. Auto-stop only applies after clean completion; failed or interrupted sessions stay alive for inspection. Background jobs auto-stop when a later `status` call observes clean completion.
+Child sessions auto-stop after clean completion by default so completed subagents do not clutter tmux or `pi-agent-hub` dashboards. Pass `autoStopOnComplete: false` when you want to inspect, attach, or send follow-up messages after completion, then use `action: "stop"` when done. Auto-stop only applies after clean completion; failed or interrupted sessions stay alive for inspection. Background jobs auto-stop when a later `status` call or parent UI poll observes clean completion.
 
 Persistent children support generic follow-up turns through `action: "send"`. By default `send` returns after pasting the message into the live child; pass `wait: true` to wait for the next completed turn. Multiline messages are bracket-pasted with newlines preserved, then submitted once.
 
@@ -91,7 +93,11 @@ Prefer not to block on asynchronous/background subagents. Launch them, do useful
 
 Use `label` when launching multiple similar agents so dashboards and status output stay distinguishable. Prefer short labels prefixed with the agent type, such as `worker-auth`, `worker-billing`, `scout-api`, or `code-critic-plan`. Labels are display names only; `agent` still selects the underlying agent definition.
 
-Every `tmux_subagent` call also performs a lightweight cleanup sweep: completed children with auto-stop enabled are stopped, while persistent idle children are reported back as a reminder to stop them when no longer needed.
+Every `tmux_subagent` call also performs a lightweight cleanup sweep: completed children with auto-stop enabled are stopped, while persistent idle children are kept in structured details as reminders for agents to stop them when no longer needed.
+
+Unfiltered `action: "status"` is intentionally compact: it shows active/error jobs plus the 5 most recently stopped jobs, then reports how many older stopped jobs are hidden. Pass `includeStopped: true` to inspect the full historical list.
+
+The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes a compact below-editor rollup by default. Toggle the expanded per-child widget with `/subagents`, `alt+s`, or `ctrl+alt+s`; use `/subagents show` and `/subagents hide` to set it explicitly. The same below-editor slot switches between aggregate and expanded views to avoid duplicate status. Widget text refreshes only when displayed text changes.
 
 Each completed child turn writes a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling.
 
@@ -101,13 +107,22 @@ Foreground runs and explicit status calls render a compact parent-session summar
 
 ```text
 tmux subagent scout
- ✓ scout · done · 2m39s
-   ⎿  Done
-      <result preview>
-   tmux: pi-agent-hub-abc123
-   attach: tmux attach-session -t pi-agent-hub-abc123
-   output: /path/to/result.md
-   stop: tmux_subagent({ action: "stop", childId: "..." })
+ ✓ done · 2m39s · 1.1k out · $0.01
+   ✓ result ready → 001-result.md
+```
+
+While tracked subagents are active, errored, or persistent-idle, the parent session shows a compact below-editor rollup by default:
+
+```text
+subagents: 1 running · 1 idle · $0.03
+```
+
+Toggle details with `/subagents`, `alt+s`, or `ctrl+alt+s` to replace the aggregate rollup with the per-child widget:
+
+```text
+tmux subagents
+⟳ scout-render  running  1m12s  5s ago  9.2k/1.1k  $0.01
+✓ scout-cost    idle     58s    —       16.7k/912  $0.02
 ```
 
 State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset.
