@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { isFreshSessionSummary, type SessionSummaryMetadata } from "./session-summary.js";
 import type { SubagentStatusResult, TmuxSubagentStatus, TmuxSubagentUsage } from "./types.js";
 
 const STATUS_PRESENTATION: Record<TmuxSubagentStatus, { glyph: string; label: string; title: string }> = {
@@ -51,6 +52,14 @@ function lastActivity(status: SubagentStatusResult): string | undefined {
   return `${formatDuration(Date.now() - status.heartbeat.updatedAt)} ago`;
 }
 
+function formatActivityLabel(status: SubagentStatusResult, now = Date.now()): string | undefined {
+  if (!status.heartbeat || status.status !== "running" && status.status !== "starting") return undefined;
+  const age = Math.max(0, now - status.heartbeat.updatedAt);
+  if (age < 1000) return "active now";
+  if (age < 60_000) return `active ${Math.floor(age / 1000)}s ago`;
+  return `no activity for ${Math.floor(age / 60_000)}m`;
+}
+
 function compactName(status: SubagentStatusResult): string {
   return status.job.displayName ?? status.job.agentName;
 }
@@ -98,6 +107,20 @@ function resultBasename(status: SubagentStatusResult): string {
   return basename(status.latestTurn?.resultPath ?? status.job.resultPath);
 }
 
+function truncateLine(text: string | undefined, max = 100): string | undefined {
+  const compact = text?.replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
+}
+
+function sanitizeWidgetDetail(text: string | undefined): string | undefined {
+  return truncateLine(text?.replace(/(?:~|\/[^\s:;,.)\]}]+(?:\/[^\s:;,.)\]}]+)*)/g, (match) => basename(match)), 100);
+}
+
+function hasResult(status: SubagentStatusResult): boolean {
+  return Boolean(status.latestTurn || status.latestResult || status.result);
+}
+
 export function formatSubagentFooterStatus(statuses: SubagentStatusResult[]): string | undefined {
   if (!statuses.length) return undefined;
   const counts = new Map<string, number>();
@@ -118,8 +141,7 @@ export function formatSubagentFooterStatus(statuses: SubagentStatusResult[]): st
   return [`subagents: ${summary}`, hasCost ? formatCost(totalCost) : undefined].filter(Boolean).join(" · ");
 }
 
-export function formatSubagentWidget(statuses: SubagentStatusResult[]): string[] | undefined {
-  if (!statuses.length) return undefined;
+function formatSubagentWidgetRows(statuses: SubagentStatusResult[]): string[] {
   const rows = statuses.map((status) => {
     const presentation = presentationFor(status);
     return {
@@ -135,9 +157,102 @@ export function formatSubagentWidget(statuses: SubagentStatusResult[]): string[]
   const stateWidth = Math.max(...rows.map((row) => row.state.length));
   const elapsedWidth = Math.max(...rows.map((row) => row.elapsed.length));
   const activityWidth = Math.max(...rows.map((row) => row.activity.length));
+  return rows.map((row) => `${row.glyph} ${row.name.padEnd(nameWidth)}  ${row.state.padEnd(stateWidth)}  ${row.elapsed.padEnd(elapsedWidth)}  ${row.activity.padEnd(activityWidth)}  ${row.usage}`);
+}
+
+export function formatSubagentWidget(statuses: SubagentStatusResult[]): string[] | undefined {
+  if (!statuses.length) return undefined;
+  return ["tmux subagents", ...formatSubagentWidgetRows(statuses)];
+}
+
+type SubagentWidgetFormatOptions = {
+  summaries?: Map<string, SessionSummaryMetadata>;
+  now?: number;
+  maxRows?: number;
+};
+
+function statusRank(status: SubagentStatusResult): number {
+  if (status.status === "error") return 0;
+  if (status.status === "starting" || status.status === "running") return 1;
+  if (status.autoStopped) return 2;
+  if (status.status === "waiting" && status.job.autoStopOnComplete === false) return 3;
+  return 4;
+}
+
+function sortedWidgetStatuses(statuses: SubagentStatusResult[]): SubagentStatusResult[] {
+  return [...statuses].sort((left, right) => statusRank(left) - statusRank(right) || (right.heartbeat?.updatedAt ?? right.job.updatedAt) - (left.heartbeat?.updatedAt ?? left.job.updatedAt));
+}
+
+function widgetPrimaryDetail(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): string | undefined {
+  const metadata = summaries.get(status.job.id);
+  const summary = metadata && isFreshSessionSummary(metadata, now) ? sanitizeWidgetDetail(metadata.summary) : undefined;
+  if (summary) return `summary: ${summary}`;
+  const task = sanitizeWidgetDetail(status.job.taskPreview);
+  if (task) return `task: ${task}`;
+  if ((status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status)) return `result: ${resultBasename(status)}`;
+  return undefined;
+}
+
+function formatSummaryRow(status: SubagentStatusResult, now: number): string {
+  const presentation = presentationFor(status);
+  const activity = formatActivityLabel(status, now);
+  const usage = formatCardUsage(status);
+  const terminalResult = (status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status) ? `result ${resultBasename(status)}` : undefined;
+  return [`${presentation.glyph} ${compactName(status)}`, presentation.label, activity, terminalResult, usage].filter(Boolean).join(" · ");
+}
+
+export function formatSubagentSummaryWidget(statuses: SubagentStatusResult[], options: SubagentWidgetFormatOptions = {}): string[] | undefined {
+  if (!statuses.length) return undefined;
+  const now = options.now ?? Date.now();
+  const summaries = options.summaries ?? new Map<string, SessionSummaryMetadata>();
+  const ordered = sortedWidgetStatuses(statuses);
+  if (ordered.length === 1) {
+    const status = ordered[0]!;
+    const summary = summaries.get(status.job.id);
+    const freshSummary = summary && isFreshSessionSummary(summary, now) ? sanitizeWidgetDetail(summary.summary) : undefined;
+    const task = sanitizeWidgetDetail(status.job.taskPreview);
+    return [
+      "tmux subagent · background",
+      formatSummaryRow(status, now),
+      task ? `  ⎿ task: ${task}` : undefined,
+      freshSummary ? `  ⎿ summary: ${freshSummary}` : undefined,
+      "╰─ /subagents details · /subagents peek",
+    ].filter((line): line is string => Boolean(line));
+  }
+
+  const maxRows = options.maxRows ?? 3;
+  const visible = ordered.slice(0, maxRows);
+  const lines = [formatSubagentFooterStatus(statuses)?.replace(/^subagents:/, "tmux subagents ·") ?? "tmux subagents"];
+  visible.forEach((status, index) => {
+    const last = index === visible.length - 1;
+    const branch = last ? "└─" : "├─";
+    const detailPrefix = last ? "   ⎿" : "│  ⎿";
+    lines.push(`${branch} ${formatSummaryRow(status, now)}`);
+    const detail = widgetPrimaryDetail(status, summaries, now);
+    if (detail) lines.push(`${detailPrefix} ${detail}`);
+  });
+  const hidden = ordered.length - visible.length;
+  if (hidden > 0) lines.push(`+${hidden} more · /subagents for details`);
+  lines.push("╰─ /subagents details · /subagents peek");
+  return lines;
+}
+
+export function formatSubagentPeekWidget(statuses: SubagentStatusResult[], summaries = new Map<string, SessionSummaryMetadata>()): string[] | undefined {
+  if (!statuses.length) return undefined;
+  const rows = formatSubagentWidgetRows(statuses);
   return [
-    "tmux subagents",
-    ...rows.map((row) => `${row.glyph} ${row.name.padEnd(nameWidth)}  ${row.state.padEnd(stateWidth)}  ${row.elapsed.padEnd(elapsedWidth)}  ${row.activity.padEnd(activityWidth)}  ${row.usage}`),
+    "tmux subagents · peek",
+    ...statuses.flatMap((status, index) => {
+      const task = truncateLine(status.job.taskPreview);
+      const metadata = summaries.get(status.job.id);
+      const summary = metadata && isFreshSessionSummary(metadata) ? truncateLine(metadata.summary) : undefined;
+      return [
+        rows[index],
+        task ? `   task: ${task}` : undefined,
+        summary ? `   summary: ${summary}` : undefined,
+        (status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status) ? `   result: ${resultBasename(status)}` : undefined,
+      ].filter((line): line is string => Boolean(line));
+    }),
   ];
 }
 

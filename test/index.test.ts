@@ -1,9 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { setImmediate as waitImmediate } from "node:timers/promises";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import extension, { resolveAutoStopOnComplete } from "../src/index.js";
+
+function killTmuxSession(name: string) {
+  try {
+    execFileSync("tmux", ["kill-session", "-t", name], { stdio: "ignore" });
+  } catch {
+    // Session may already be gone.
+  }
+}
+
+function createTmuxSession(name: string) {
+  killTmuxSession(name);
+  execFileSync("tmux", ["new-session", "-d", "-s", name, "sleep 100"], { stdio: "ignore" });
+}
+
+async function waitForWidget(widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]>, matcher: (content: string[] | undefined) => boolean) {
+  for (let index = 0; index < 10; index += 1) {
+    const latest = widgets.at(-1)?.[1];
+    if (matcher(latest)) return latest;
+    await waitImmediate();
+  }
+  return widgets.at(-1)?.[1];
+}
+
+async function handlersShutdown(handlers: Map<string, Function>) {
+  await handlers.get("session_shutdown")?.();
+}
 
 function isolatePiStateEnv(agentDir: string): () => void {
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -57,6 +85,13 @@ test("tmux_subagent uses canonical parent status and widget keys", async () => {
     await handlers.get("session_start")?.({}, {
       cwd: process.cwd(),
       ui: {
+        theme: {
+          colors: { muted: true },
+          fg(this: { colors: Record<string, boolean> }, token: string, text: string) {
+            assert.ok(this.colors);
+            return `<${token}>${text}</${token}>`;
+          },
+        },
         setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
         setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]),
       },
@@ -65,6 +100,89 @@ test("tmux_subagent uses canonical parent status and widget keys", async () => {
     assert.deepEqual(statuses, [["pi-tmux-subagents", undefined]]);
     assert.deepEqual(widgets, [["pi-tmux-subagents", undefined, undefined]]);
   } finally {
+    restorePiEnv();
+  }
+});
+
+test("tmux_subagent retains auto-stopped completions briefly and then clears", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100_000 });
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-retention-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "retained-child";
+  const tmuxSession = `pi-tmux-retention-${process.pid}`;
+  mkdirSync(join(state, "jobs", id), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "scout", displayName: "scout-retained", taskPreview: "Finish retained child", cwd: root, tmuxSession, status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: 90_000, updatedAt: 90_000, autoStopOnComplete: true }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "heartbeat.json"), `${JSON.stringify({ jobId: id, cwd: root, state: "waiting", stateSince: 99_000, updatedAt: 99_000, seenRunning: true }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "result.md"), "Done\n");
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  const handlers = new Map<string, Function>();
+  const widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]> = [];
+  let tool: any;
+  createTmuxSession(tmuxSession);
+  try {
+    extension({
+      registerTool(def: any) { tool = def; },
+      on(name: string, handler: Function) { handlers.set(name, handler); },
+    } as any);
+    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]) } });
+
+    await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
+
+    assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /scout-retained · done/);
+    t.mock.timers.tick(10_001);
+    assert.equal(widgets.at(-1)?.[1], undefined);
+  } finally {
+    await handlersShutdown(handlers);
+    killTmuxSession(tmuxSession);
+    restorePiEnv();
+  }
+});
+
+test("tmux_subagent summary widget expires stale summaries while idle", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 200_000 });
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-summary-expiry-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const hub = join(root, "hub");
+  const id = "summary-child";
+  const tmuxSession = `pi-tmux-summary-${process.pid}`;
+  mkdirSync(join(state, "jobs", id), { recursive: true });
+  mkdirSync(join(hub, "session-summary"), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "scout", displayName: "scout-summary", taskPreview: "Keep summary fallback", cwd: root, tmuxSession, status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: 100_000, updatedAt: 100_000, autoStopOnComplete: false }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "heartbeat.json"), `${JSON.stringify({ jobId: id, cwd: root, state: "waiting", stateSince: 199_000, updatedAt: 199_000, seenRunning: true }, null, 2)}\n`);
+  writeFileSync(join(hub, "session-summary", `${id}.json`), `${JSON.stringify({ version: 1, source: "pi-session-summary", state: "waiting", summary: "Fresh summary detail", updatedAt: 200_000 }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  process.env.PI_AGENT_HUB_DIR = hub;
+  const handlers = new Map<string, Function>();
+  const widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]> = [];
+  let tool: any;
+  createTmuxSession(tmuxSession);
+  try {
+    extension({
+      registerTool(def: any) { tool = def; },
+      on(name: string, handler: Function) { handlers.set(name, handler); },
+    } as any);
+    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]) } });
+
+    await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
+    const fresh = await waitForWidget(widgets, (content) => /summary: Fresh summary detail/.test(content?.join("\n") ?? ""));
+    assert.match(fresh?.join("\n") ?? "", /summary: Fresh summary detail/);
+
+    t.mock.timers.tick(60_002);
+    assert.doesNotMatch(widgets.at(-1)?.[1]?.join("\n") ?? "", /Fresh summary detail/);
+    assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /task: Keep summary fallback/);
+  } finally {
+    await handlersShutdown(handlers);
+    killTmuxSession(tmuxSession);
     restorePiEnv();
   }
 });
@@ -157,8 +275,34 @@ test("tmux_subagent registers subagent widget command and shortcut", () => {
 
   assert.equal(command.name, "subagents");
   assert.match(command.description, /details widget/);
+  assert.match(command.description, /peek mode/);
   assert.deepEqual(shortcuts.map((shortcut) => shortcut.key), ["alt+s", "ctrl+alt+s"]);
   assert.match(shortcuts[0].description, /details widget/);
+});
+
+test("subagents command supports peek and toggles peek back to summary", async () => {
+  let command: any;
+  const shortcuts: any[] = [];
+  const notifications: string[] = [];
+  extension({
+    registerTool() {},
+    on() {},
+    registerCommand(name: string, def: any) { command = { name, ...def }; },
+    registerShortcut(key: string, def: any) { shortcuts.push({ key, ...def }); },
+  } as any);
+  const ctx = { ui: { notify: (message: string) => notifications.push(message) } };
+
+  await command.handler("peek", ctx);
+  await shortcuts[0].handler(ctx);
+  await command.handler("show", ctx);
+  await command.handler("hide", ctx);
+
+  assert.deepEqual(notifications, [
+    "Subagent peek shown.",
+    "Subagent details hidden.",
+    "Subagent details shown.",
+    "Subagent details hidden.",
+  ]);
 });
 
 test("tmux_subagent exposes persistent send and wait actions", () => {

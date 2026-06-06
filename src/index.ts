@@ -1,10 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
-import { formatSubagentFooterStatus, formatSubagentWidget, formatUserStatus } from "./format.js";
+import { formatSubagentFooterStatus, formatSubagentPeekWidget, formatSubagentSummaryWidget, formatSubagentWidget, formatUserStatus } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
 import { autoStopCompletedSubagent, cancelSubagent, cleanupCompletedSubagents, getSubagentStatus, launchSubagent, sendSubagentMessage, waitForAnySubagent, waitForSubagent, type CleanupCompletedResult } from "./run.js";
+import { isFreshSessionSummary, readSessionSummaries, SESSION_SUMMARY_STALE_MS, type SessionSummaryMetadata } from "./session-summary.js";
 import { loadJobs } from "./state.js";
 import type { AgentScope, SubagentStatusResult, TmuxSubagentJob } from "./types.js";
 
@@ -46,23 +47,128 @@ let lastWidgetText: string | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
 let polling = false;
 let pollRoot: string | undefined;
-let widgetExpanded = false;
+type SubagentWidgetMode = "summary" | "details" | "peek";
 
-function visibleStatuses(): SubagentStatusResult[] {
-  return [...activeJobs.values()].filter((status) => {
+const COMPLETION_RETENTION_MS = 10_000;
+const retainedCompletions = new Map<string, { status: SubagentStatusResult; expiresAt: number }>();
+let completionRetentionTimer: NodeJS.Timeout | undefined;
+let widgetThemeFg: ((token: any, text: string) => string) | undefined;
+let widgetMode: SubagentWidgetMode = "summary";
+let summaryCache = new Map<string, SessionSummaryMetadata>();
+let summaryRefreshSequence = 0;
+let summaryExpiryTimer: NodeJS.Timeout | undefined;
+
+function visibleStatuses(now = Date.now()): SubagentStatusResult[] {
+  pruneCompletionRetentions(now);
+  const statuses = [...activeJobs.values()].filter((status) => {
     if (status.status === "starting" || status.status === "running" || status.status === "error") return true;
     return status.status === "waiting" && status.job.autoStopOnComplete === false;
   });
+  const visibleIds = new Set(statuses.map((status) => status.job.id));
+  for (const [id, retained] of retainedCompletions) {
+    if (retained.expiresAt > now && !visibleIds.has(id)) statuses.push(retained.status);
+  }
+  return statuses;
 }
 
 function hasActiveStatuses(): boolean {
   return visibleStatuses().some((status) => status.status === "starting" || status.status === "running");
 }
 
+function visibleStatusIds(statuses: SubagentStatusResult[]): string[] {
+  return statuses.map((status) => status.job.id).sort();
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+function pruneCompletionRetentions(now = Date.now()) {
+  for (const [id, retained] of retainedCompletions) {
+    if (retained.expiresAt <= now) retainedCompletions.delete(id);
+  }
+}
+
+function clearCompletionRetentionTimer() {
+  if (completionRetentionTimer) clearTimeout(completionRetentionTimer);
+  completionRetentionTimer = undefined;
+}
+
+function scheduleCompletionRetentionClear(now = Date.now()) {
+  clearCompletionRetentionTimer();
+  let nextExpiry: number | undefined;
+  for (const retained of retainedCompletions.values()) {
+    if (retained.expiresAt <= now) continue;
+    nextExpiry = Math.min(nextExpiry ?? retained.expiresAt, retained.expiresAt);
+  }
+  if (nextExpiry === undefined) return;
+  completionRetentionTimer = setTimeout(() => {
+    completionRetentionTimer = undefined;
+    pruneCompletionRetentions();
+    refreshParentStatus();
+    scheduleCompletionRetentionClear();
+  }, Math.max(1, nextExpiry - now));
+  completionRetentionTimer.unref?.();
+}
+
+function rememberCompletion(status: SubagentStatusResult, now = Date.now()) {
+  if (!status.autoStopped) return;
+  retainedCompletions.set(status.job.id, { status, expiresAt: now + COMPLETION_RETENTION_MS });
+  scheduleCompletionRetentionClear(now);
+}
+
+function pruneSummaryCache(now = Date.now()) {
+  for (const [id, summary] of summaryCache) {
+    if (!isFreshSessionSummary(summary, now)) summaryCache.delete(id);
+  }
+}
+
+function clearSummaryExpiryTimer() {
+  if (summaryExpiryTimer) clearTimeout(summaryExpiryTimer);
+  summaryExpiryTimer = undefined;
+}
+
+function scheduleSummaryExpiryRefresh(now = Date.now()) {
+  clearSummaryExpiryTimer();
+  if (widgetMode !== "summary" && widgetMode !== "peek") return;
+  pruneSummaryCache(now);
+  const visibleIds = new Set(visibleStatusIds(visibleStatuses(now)));
+  let nextExpiry: number | undefined;
+  for (const [id, summary] of summaryCache) {
+    if (!visibleIds.has(id)) continue;
+    const expiry = summary.updatedAt + SESSION_SUMMARY_STALE_MS + 1;
+    if (expiry <= now) continue;
+    nextExpiry = Math.min(nextExpiry ?? expiry, expiry);
+  }
+  if (nextExpiry === undefined) return;
+  summaryExpiryTimer = setTimeout(() => {
+    summaryExpiryTimer = undefined;
+    pruneSummaryCache();
+    refreshParentStatus();
+    scheduleSummaryExpiryRefresh();
+  }, Math.max(1, nextExpiry - now));
+  summaryExpiryTimer.unref?.();
+}
+
+function toneWidgetLine(line: string): string {
+  if (!widgetThemeFg) return line;
+  const token = line.startsWith("tmux subagent") ? "muted"
+    : line.startsWith("+") || line.startsWith("╰") ? "dim"
+      : /[│ ]  ⎿/.test(line) ? "dim"
+        : /✗/.test(line) ? "error"
+          : /⟳/.test(line) ? "accent"
+            : /✓/.test(line) ? "success"
+              : "muted";
+  return widgetThemeFg(token, line);
+}
+
 function applyParentUi() {
   const statuses = visibleStatuses();
-  const footerText = formatSubagentFooterStatus(statuses);
-  const widgetLines = widgetExpanded ? formatSubagentWidget(statuses) : footerText ? [footerText] : undefined;
+  const widgetLines = widgetMode === "peek"
+    ? formatSubagentPeekWidget(statuses, summaryCache)
+    : widgetMode === "details"
+      ? formatSubagentWidget(statuses)
+      : formatSubagentSummaryWidget(statuses, { summaries: summaryCache });
   const widgetText = widgetLines?.join("\n");
 
   if (lastStatusText !== undefined) {
@@ -75,9 +181,22 @@ function applyParentUi() {
   }
 }
 
+async function refreshSummaryCacheFor(statuses: SubagentStatusResult[], mode: SubagentWidgetMode = widgetMode) {
+  if (mode !== "summary" && mode !== "peek") return;
+  const ids = visibleStatusIds(statuses);
+  const sequence = ++summaryRefreshSequence;
+  const summaries = await readSessionSummaries(ids).catch(() => new Map<string, SessionSummaryMetadata>());
+  if (sequence !== summaryRefreshSequence || widgetMode !== mode || !sameIds(ids, visibleStatusIds(visibleStatuses()))) return;
+  summaryCache = summaries;
+  scheduleSummaryExpiryRefresh();
+  refreshParentStatus();
+}
+
 function trackStatus(status: SubagentStatusResult) {
   activeJobs.set(status.job.id, status);
+  rememberCompletion(status);
   refreshParentStatus();
+  void refreshSummaryCacheFor(visibleStatuses());
   if (pollRoot) startStatusPolling(pollRoot);
 }
 
@@ -102,8 +221,11 @@ function startStatusPolling(root: string) {
         return status.job.autoStopOnComplete ? autoStopCompletedSubagent(root, status) : status;
       }));
       for (const status of statuses) {
-        if (status) activeJobs.set(status.job.id, status);
+        if (!status) continue;
+        activeJobs.set(status.job.id, status);
+        rememberCompletion(status);
       }
+      await refreshSummaryCacheFor(visibleStatuses());
       refreshParentStatus();
     } finally {
       polling = false;
@@ -122,15 +244,19 @@ function refreshParentStatus() {
   if (!hasActiveStatuses()) stopStatusPolling();
 }
 
-function setWidgetExpanded(value: boolean) {
-  widgetExpanded = value;
+function setWidgetMode(value: SubagentWidgetMode) {
+  widgetMode = value;
+  summaryCache = new Map();
+  summaryRefreshSequence++;
+  clearSummaryExpiryTimer();
   lastWidgetText = undefined;
   refreshParentStatus();
+  void refreshSummaryCacheFor(visibleStatuses(), value);
 }
 
-function toggleWidgetExpanded() {
-  setWidgetExpanded(!widgetExpanded);
-  return widgetExpanded;
+function toggleWidgetMode() {
+  setWidgetMode(widgetMode === "summary" ? "details" : "summary");
+  return widgetMode;
 }
 
 function normalizeDisplayName(value: string | undefined): string | undefined {
@@ -205,6 +331,18 @@ function cleanupNote(cleanup: CleanupCompletedResult): string | undefined {
   return notes.length ? `${notes.join("; ")}.` : undefined;
 }
 
+function trackCleanupCompletions(cleanup: CleanupCompletedResult) {
+  for (const status of cleanup.autoStopped) {
+    if (!activeJobs.has(status.job.id)) continue;
+    activeJobs.set(status.job.id, status);
+    rememberCompletion(status);
+  }
+  if (cleanup.autoStopped.length) {
+    refreshParentStatus();
+    void refreshSummaryCacheFor(visibleStatuses());
+  }
+}
+
 function withCleanupNote(result: ToolTextResult, cleanup: CleanupCompletedResult): ToolTextResult {
   const note = cleanupNote(cleanup);
   if (!note) return result;
@@ -251,9 +389,10 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const ui = (ctx as PiContext).ui;
     setStatus = ui?.setStatus ? (text) => ui.setStatus?.(STATUS_KEY, text) : undefined;
+    widgetThemeFg = ui?.theme?.fg?.bind(ui.theme);
     setWidget = ui?.setWidget ? (content) => {
       if (!content) return ui.setWidget?.(STATUS_KEY, undefined);
-      const lines = ui.theme?.fg ? content.map((line) => ui.theme?.fg?.("muted", line) ?? line) : content;
+      const lines = content.map(toneWidgetLine);
       return ui.setWidget?.(STATUS_KEY, lines, { placement: "belowEditor" });
     } : undefined;
     lastStatusText = "";
@@ -265,27 +404,38 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     setWidget?.(undefined);
     setStatus = undefined;
     setWidget = undefined;
+    widgetThemeFg = undefined;
     lastStatusText = undefined;
     lastWidgetText = undefined;
-    widgetExpanded = false;
+    widgetMode = "summary";
+    summaryCache = new Map();
+    summaryRefreshSequence++;
+    clearSummaryExpiryTimer();
+    clearCompletionRetentionTimer();
+    retainedCompletions.clear();
     stopStatusPolling();
     activeJobs.clear();
   });
 
   pi.registerCommand?.("subagents", {
-    description: "Toggle tmux subagent details widget",
+    description: "Toggle tmux subagent details widget, or show peek mode with task and optional session summaries",
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
-      const expanded = arg === "show" || arg === "on" ? (setWidgetExpanded(true), true) : arg === "hide" || arg === "off" ? (setWidgetExpanded(false), false) : toggleWidgetExpanded();
-      ctx.ui?.notify?.(`Subagent details ${expanded ? "shown" : "hidden"}.`, "info");
+      if (arg === "peek") {
+        setWidgetMode("peek");
+        ctx.ui?.notify?.("Subagent peek shown.", "info");
+        return;
+      }
+      const mode = arg === "show" || arg === "on" || arg === "details" ? (setWidgetMode("details"), "details") : arg === "hide" || arg === "off" ? (setWidgetMode("summary"), "summary") : toggleWidgetMode();
+      ctx.ui?.notify?.(`Subagent details ${mode === "summary" ? "hidden" : "shown"}.`, "info");
     },
   });
 
   const toggleShortcut = {
     description: "Toggle tmux subagent details widget",
     handler: async (ctx: ExtensionContext) => {
-      const expanded = toggleWidgetExpanded();
-      ctx.ui?.notify?.(`Subagent details ${expanded ? "shown" : "hidden"}.`, "info");
+      const mode = toggleWidgetMode();
+      ctx.ui?.notify?.(`Subagent details ${mode === "summary" ? "hidden" : "shown"}.`, "info");
     },
   };
   pi.registerShortcut?.("alt+s", toggleShortcut);
@@ -312,6 +462,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           return requestedId ? !job.id.startsWith(requestedId) : true;
         },
       });
+      trackCleanupCompletions(cleanup);
       const reply = (content: string, details?: unknown, isError?: boolean) => withCleanupNote(text(content, details, isError), cleanup);
 
       if (params.action === "list") {
