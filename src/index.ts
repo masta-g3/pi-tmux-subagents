@@ -296,8 +296,8 @@ function formatJobsStatus(jobs: TmuxSubagentJob[], includeStopped: boolean): str
 const TmuxSubagentParams = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop", "send", "wait"], description: "Management action. Omit to launch an agent. stop is an alias for cancel." },
-    agent: { type: "string", description: "Agent name for launch/get." },
+    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop", "send", "wait"], description: "Management action. Omit to launch an agent. get reads an agent definition; status/wait/send/stop manage launched child jobs. stop is an alias for cancel." },
+    agent: { type: "string", description: "Agent definition name for launch/get, e.g. scout or code-critic. Not a launched child job id." },
     task: { type: "string", description: "Task for launch." },
     label: { type: "string", description: "Optional short dashboard label for launch; prefix with agent type, e.g. worker-auth or scout-api." },
     message: { type: "string", description: "Message to send for action=send." },
@@ -305,7 +305,7 @@ const TmuxSubagentParams = {
     timeoutMs: { type: "number", description: "Optional timeout for action=send with wait=true or action=wait; wait leaves children alive on timeout." },
     background: { type: "boolean", description: "Return immediately after spawning the tmux child. Default false." },
     includeStopped: { type: "boolean", default: false, description: "For action=status without childId, include all stopped historical jobs. Default false shows active/error jobs plus the 5 most recently stopped jobs." },
-    childId: { type: "string", description: "Child job ID or unique prefix. For action=wait, omit to return when any active child completes." },
+    childId: { type: "string", description: "Launched child job ID or unique prefix for status/send/wait/stop. For action=wait, omit to return when any active child completes." },
     id: { type: "string", description: "Alias for childId." },
     agentScope: { type: "string", enum: ["user", "project", "both"], description: "Agent discovery scope. Default user." },
     cwd: { type: "string", description: "Working directory for the child. Defaults to parent cwd." },
@@ -476,7 +476,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       }
 
       if (params.action === "get") {
-        if (!params.agent) return reply("Missing agent for get action.", undefined, true);
+        if (!params.agent) return reply('Missing agent for get action. Use action: "get" with agent: "code-critic" to inspect an agent definition. To inspect a launched child/result, use action: "status" with childId.', undefined, true);
         if (inNestedSession && !nestedPolicy.allowlist.includes(params.agent)) return reply(nestedPolicy.allowlist.length ? `Nested agent ${params.agent} is not allowed. Allowed agents: ${nestedPolicy.allowlist.join(", ")}.` : nestedDisabledMessage(), undefined, true);
         const agent = findAgent(cwd, params.agent, scope);
         if (!agent) return reply(`Unknown agent: ${params.agent}`, { available: discoverAgents(cwd, scope).agents.map((a) => a.name) }, true);
