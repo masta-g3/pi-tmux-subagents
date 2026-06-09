@@ -97,7 +97,7 @@ Every `tmux_subagent` call also performs a lightweight cleanup sweep: completed 
 
 Unfiltered `action: "status"` is intentionally compact: it shows active/error jobs plus the 5 most recently stopped jobs, then reports how many older stopped jobs are hidden. Pass `includeStopped: true` to inspect the full historical list.
 
-The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact below-editor widget by default for active, errored, persistent-idle, or briefly retained completed children. It shows task previews and, when a fresh `pi-session-summary` record exists, an optional `summary:` line; this extension only reads those records and never generates summaries itself. Toggle the per-child details table with `/subagents`, `alt+s`, or `ctrl+alt+s`; use `/subagents show` and `/subagents hide` to set it explicitly. Use `/subagents peek` for the wider task/summary/result view. These modes share the same below-editor slot to avoid duplicate status. Widget text refreshes only when displayed text changes.
+The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact below-editor widget by default for active, errored, persistent-idle, or briefly retained completed children. It shows task previews by default and, when fresh Agent Hub session metadata exists at `session-metadata/<child-id>.json`, reuses compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`) without generating summaries itself. Toggle the per-child details table with `/subagents`, `alt+s`, or `ctrl+alt+s`; use `/subagents show` and `/subagents hide` to set it explicitly. Use `/subagents peek` for the wider task/status/result view. These modes share the same below-editor slot to avoid duplicate status. Widget text refreshes only when displayed text changes.
 
 Each completed child turn writes a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling.
 
@@ -116,7 +116,7 @@ While tracked subagents are active, errored, persistent-idle, or briefly retaine
 ```text
 tmux subagents · 2 running · 1 idle · $0.04
 ├─ ⟳ scout-auth · running · active 4s ago · 1.1k out · $0.01
-│  ⎿ summary: Reviewing session handling and auth middleware.
+│  ⎿ status: Reviewing session handling and auth middleware.
 ├─ ⟳ worker-ui · running · active 8s ago
 │  ⎿ task: Update subagent widget rendering
 └─ ✓ scout-docs · idle · result 001-result.md · $0.03
@@ -129,8 +129,9 @@ A single child uses the same default widget with a compact card:
 ```text
 tmux subagent · background
 ⟳ scout-auth · running · active 4s ago · 1.4k out · $0.08
-  ⎿ task: Inspect auth flow and report risks
-  ⎿ summary: Reviewing session handling and auth middleware.
+  ⎿ goal: Inspect auth flow
+  ⎿ status: Reviewing session handling and auth middleware.
+  ⎿ next: Check token refresh.
 ╰─ /subagents details · /subagents peek
 ```
 
@@ -142,7 +143,7 @@ tmux subagents
 ✓ scout-cost    idle     58s    —       16.7k/912  $0.02
 ```
 
-Use `/subagents peek` for a wider opt-in task/summary/result view.
+Use `/subagents peek` for a wider opt-in task/status/result view.
 
 State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset.
 

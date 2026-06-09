@@ -185,8 +185,10 @@ function sortedWidgetStatuses(statuses: SubagentStatusResult[]): SubagentStatusR
 
 function widgetPrimaryDetail(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): string | undefined {
   const metadata = summaries.get(status.job.id);
-  const summary = metadata && isFreshSessionSummary(metadata, now) ? sanitizeWidgetDetail(metadata.summary) : undefined;
-  if (summary) return `summary: ${summary}`;
+  const semanticStatus = metadata && isFreshSessionSummary(metadata, now) ? sanitizeWidgetDetail(metadata.status) : undefined;
+  if (semanticStatus) return `status: ${semanticStatus}`;
+  const goal = metadata && isFreshSessionSummary(metadata, now) ? sanitizeWidgetDetail(metadata.goal) : undefined;
+  if (goal) return `goal: ${goal}`;
   const task = sanitizeWidgetDetail(status.job.taskPreview);
   if (task) return `task: ${task}`;
   if ((status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status)) return `result: ${resultBasename(status)}`;
@@ -208,14 +210,18 @@ export function formatSubagentSummaryWidget(statuses: SubagentStatusResult[], op
   const ordered = sortedWidgetStatuses(statuses);
   if (ordered.length === 1) {
     const status = ordered[0]!;
-    const summary = summaries.get(status.job.id);
-    const freshSummary = summary && isFreshSessionSummary(summary, now) ? sanitizeWidgetDetail(summary.summary) : undefined;
-    const task = sanitizeWidgetDetail(status.job.taskPreview);
+    const metadata = summaries.get(status.job.id);
+    const freshMetadata = metadata && isFreshSessionSummary(metadata, now) ? metadata : undefined;
+    const goal = sanitizeWidgetDetail(freshMetadata?.goal);
+    const semanticStatus = sanitizeWidgetDetail(freshMetadata?.status);
+    const nextStep = sanitizeWidgetDetail(freshMetadata?.nextStep);
+    const task = goal ? undefined : sanitizeWidgetDetail(status.job.taskPreview);
     return [
       "tmux subagent · background",
       formatSummaryRow(status, now),
-      task ? `  ⎿ task: ${task}` : undefined,
-      freshSummary ? `  ⎿ summary: ${freshSummary}` : undefined,
+      goal ? `  ⎿ goal: ${goal}` : task ? `  ⎿ task: ${task}` : undefined,
+      semanticStatus ? `  ⎿ status: ${semanticStatus}` : undefined,
+      nextStep ? `  ⎿ next: ${nextStep}` : undefined,
       "╰─ /subagents details · /subagents peek",
     ].filter((line): line is string => Boolean(line));
   }
@@ -245,11 +251,15 @@ export function formatSubagentPeekWidget(statuses: SubagentStatusResult[], summa
     ...statuses.flatMap((status, index) => {
       const task = truncateLine(status.job.taskPreview);
       const metadata = summaries.get(status.job.id);
-      const summary = metadata && isFreshSessionSummary(metadata) ? truncateLine(metadata.summary) : undefined;
+      const freshMetadata = metadata && isFreshSessionSummary(metadata) ? metadata : undefined;
+      const goal = truncateLine(freshMetadata?.goal);
+      const semanticStatus = truncateLine(freshMetadata?.status);
+      const nextStep = truncateLine(freshMetadata?.nextStep);
       return [
         rows[index],
-        task ? `   task: ${task}` : undefined,
-        summary ? `   summary: ${summary}` : undefined,
+        goal ? `   goal: ${goal}` : task ? `   task: ${task}` : undefined,
+        semanticStatus ? `   status: ${semanticStatus}` : undefined,
+        nextStep ? `   next: ${nextStep}` : undefined,
         (status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status) ? `   result: ${resultBasename(status)}` : undefined,
       ].filter((line): line is string => Boolean(line));
     }),

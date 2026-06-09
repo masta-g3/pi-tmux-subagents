@@ -124,14 +124,15 @@ test("formatSubagentSummaryWidget renders adaptive single child card with task a
 
   const output = formatSubagentSummaryWidget([running], {
     now: 62_000,
-    summaries: new Map([[running.job.id, { summary: "Reviewing /Users/manager/Code/app/src/session.ts and middleware.", updatedAt: 61_000 }]]),
+    summaries: new Map([[running.job.id, { goal: "Inspect auth flow", status: "Reviewing /Users/manager/Code/app/src/session.ts and middleware.", nextStep: "Run auth tests", stage: "implementing", updatedAt: 61_000 }]]),
   });
 
   assert.deepEqual(output, [
     "tmux subagent · background",
     "⟳ scout-auth · running · active 4s ago · 1.4k out · $0.08",
-    "  ⎿ task: Inspect auth flow in auth.ts",
-    "  ⎿ summary: Reviewing session.ts and middleware.",
+    "  ⎿ goal: Inspect auth flow",
+    "  ⎿ status: Reviewing session.ts and middleware.",
+    "  ⎿ next: Run auth tests",
     "╰─ /subagents details · /subagents peek",
   ]);
   assert.doesNotMatch(output!.join("\n"), /\/Users\/manager|model:|attach:|stop:|Pane preview/);
@@ -178,7 +179,7 @@ test("formatSubagentSummaryWidget renders capped multi child list ordered by sev
 test("formatSubagentSummaryWidget suppresses stale summaries", () => {
   const output = formatSubagentSummaryWidget([status({ result: "" })], {
     now: 120_000,
-    summaries: new Map([["child-123", { summary: "Stale activity", updatedAt: 1 }]]),
+    summaries: new Map([["child-123", { status: "Stale activity", updatedAt: 1 }]]),
   });
 
   assert.deepEqual(output, [
@@ -201,13 +202,14 @@ test("formatSubagentPeekWidget renders task, summary, and result basename", () =
     latestTurn: { index: 1, status: "waiting", startedAt: 100_000, completedAt: 160_000, resultPath: "/tmp/jobs/child-456/turns/001-result.md" },
   });
 
-  const output = formatSubagentPeekWidget([running, idle], new Map([[running.job.id, { summary: "Reviewing session handling and auth middleware.", updatedAt: Date.now() }]]));
+  const output = formatSubagentPeekWidget([running, idle], new Map([[running.job.id, { goal: "Inspect auth flow", status: "Reviewing session handling and auth middleware.", nextStep: "Check token refresh", updatedAt: Date.now() }]]));
 
   assert.deepEqual(output, [
     "tmux subagents · peek",
     "⟳ scout-auth  running  2m39s  0s ago  —",
-    "   task: Inspect auth flow and report risks",
-    "   summary: Reviewing session handling and auth middleware.",
+    "   goal: Inspect auth flow",
+    "   status: Reviewing session handling and auth middleware.",
+    "   next: Check token refresh",
     "✓ scout-docs  idle     2m39s  —       —",
     "   task: Check docs coverage",
     "   result: 001-result.md",
@@ -217,7 +219,7 @@ test("formatSubagentPeekWidget renders task, summary, and result basename", () =
 
 test("formatSubagentPeekWidget shows task only when summaries are absent or stale", () => {
   const freshOutput = formatSubagentPeekWidget([status({ result: "" })]);
-  const staleOutput = formatSubagentPeekWidget([status({ result: "" })], new Map([["child-123", { summary: "Stale activity", updatedAt: 1 }]]));
+  const staleOutput = formatSubagentPeekWidget([status({ result: "" })], new Map([["child-123", { status: "Stale activity", updatedAt: 1 }]]));
   const expected = [
     "tmux subagents · peek",
     "✓ scout  done  2m39s  —  —",

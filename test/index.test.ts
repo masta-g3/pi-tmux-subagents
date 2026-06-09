@@ -152,13 +152,13 @@ test("tmux_subagent summary widget expires stale summaries while idle", async (t
   const id = "summary-child";
   const tmuxSession = `pi-tmux-summary-${process.pid}`;
   mkdirSync(join(state, "jobs", id), { recursive: true });
-  mkdirSync(join(hub, "session-summary"), { recursive: true });
+  mkdirSync(join(hub, "session-metadata"), { recursive: true });
   writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
     version: 1,
     jobs: [{ id, agentName: "scout", displayName: "scout-summary", taskPreview: "Keep summary fallback", cwd: root, tmuxSession, status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: 100_000, updatedAt: 100_000, autoStopOnComplete: false }],
   }, null, 2)}\n`);
   writeFileSync(join(state, "jobs", id, "heartbeat.json"), `${JSON.stringify({ jobId: id, cwd: root, state: "waiting", stateSince: 199_000, updatedAt: 199_000, seenRunning: true }, null, 2)}\n`);
-  writeFileSync(join(hub, "session-summary", `${id}.json`), `${JSON.stringify({ version: 1, source: "pi-session-summary", state: "waiting", summary: "Fresh summary detail", updatedAt: 200_000 }, null, 2)}\n`);
+  writeFileSync(join(hub, "session-metadata", `${id}.json`), `${JSON.stringify({ source: "pi-session-summary", status: "Fresh summary detail", stage: "waiting", updatedAt: 200_000 }, null, 2)}\n`);
 
   const restorePiEnv = isolatePiStateEnv(agentDir);
   process.env.PI_AGENT_HUB_DIR = hub;
@@ -174,8 +174,8 @@ test("tmux_subagent summary widget expires stale summaries while idle", async (t
     await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]) } });
 
     await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
-    const fresh = await waitForWidget(widgets, (content) => /summary: Fresh summary detail/.test(content?.join("\n") ?? ""));
-    assert.match(fresh?.join("\n") ?? "", /summary: Fresh summary detail/);
+    const fresh = await waitForWidget(widgets, (content) => /status: Fresh summary detail/.test(content?.join("\n") ?? ""));
+    assert.match(fresh?.join("\n") ?? "", /status: Fresh summary detail/);
 
     t.mock.timers.tick(60_002);
     assert.doesNotMatch(widgets.at(-1)?.[1]?.join("\n") ?? "", /Fresh summary detail/);

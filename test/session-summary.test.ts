@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { readSessionSummaries } from "../src/session-summary.js";
 
 function writeSummary(root: string, id: string, value: unknown) {
-  const dir = join(root, "session-summary");
+  const dir = join(root, "session-metadata");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${id}.json`), `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -14,44 +14,42 @@ function writeSummary(root: string, id: string, value: unknown) {
 test("readSessionSummaries returns valid pi-session-summary metadata", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-summary-test-"));
   writeSummary(root, "child-1", {
-    version: 1,
     source: "pi-session-summary",
-    cwd: "/repo",
-    state: "running",
-    summary: " Reviewing auth middleware.\n",
-    phase: "implementing",
-    sequence: 1,
+    goal: "Inspect auth flow",
+    status: " Reviewing auth middleware.\n",
+    nextStep: "Run auth tests",
+    stage: "implementing",
+    confidence: 0.8,
     updatedAt: 10_000,
   });
 
   const summaries = await readSessionSummaries(["child-1"], { PI_AGENT_HUB_DIR: root } as NodeJS.ProcessEnv, 12_000);
 
-  assert.deepEqual(summaries.get("child-1"), { summary: "Reviewing auth middleware.", phase: "implementing", updatedAt: 10_000 });
+  assert.deepEqual(summaries.get("child-1"), { goal: "Inspect auth flow", status: "Reviewing auth middleware.", nextStep: "Run auth tests", stage: "implementing", confidence: 0.8, updatedAt: 10_000 });
 });
 
-test("readSessionSummaries ignores missing, invalid, wrong source, and stale files", async () => {
+test("readSessionSummaries ignores missing, invalid, stale, empty, and low-confidence files", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-summary-invalid-test-"));
-  mkdirSync(join(root, "session-summary"), { recursive: true });
-  writeFileSync(join(root, "session-summary", "bad-json.json"), "{");
-  writeSummary(root, "wrong-source", { version: 1, source: "other", state: "running", summary: "No", updatedAt: 10_000 });
-  writeSummary(root, "stale", { version: 1, source: "pi-session-summary", state: "running", summary: "Old", updatedAt: 1 });
+  mkdirSync(join(root, "session-metadata"), { recursive: true });
+  writeFileSync(join(root, "session-metadata", "bad-json.json"), "{");
+  writeSummary(root, "stale", { source: "pi-session-summary", status: "Old", updatedAt: 1 });
+  writeSummary(root, "empty", { source: "pi-session-summary", updatedAt: 10_000 });
+  writeSummary(root, "low-confidence", { source: "pi-session-summary", status: "Uncertain", confidence: 0.2, updatedAt: 10_000 });
 
-  const summaries = await readSessionSummaries(["missing", "bad-json", "wrong-source", "stale"], { PI_AGENT_HUB_DIR: root } as NodeJS.ProcessEnv, 100_000);
+  const summaries = await readSessionSummaries(["missing", "bad-json", "stale", "empty", "low-confidence"], { PI_AGENT_HUB_DIR: root } as NodeJS.ProcessEnv, 100_000);
 
   assert.equal(summaries.size, 0);
 });
 
-test("readSessionSummaries filters control states", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-tmux-summary-state-test-"));
-  const accepted = ["starting", "running", "waiting", "complete", "blocked"];
-  const suppressed = ["disabled", "no_model", "error", "shutdown"];
-  for (const state of [...accepted, ...suppressed]) {
-    writeSummary(root, state, { version: 1, source: "pi-session-summary", state, summary: `Summary ${state}`, updatedAt: 10_000 });
-  }
+test("readSessionSummaries accepts generic Hub metadata with optional source", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-summary-generic-test-"));
+  writeSummary(root, "child-1", { status: "Reviewing docs", stage: "reviewing", updatedAt: 10_000 });
+  writeSummary(root, "child-2", { source: "other-extension", status: "Checking tests", updatedAt: 10_000 });
 
-  const summaries = await readSessionSummaries([...accepted, ...suppressed], { PI_AGENT_HUB_DIR: root } as NodeJS.ProcessEnv, 12_000);
+  const summaries = await readSessionSummaries(["child-1", "child-2"], { PI_AGENT_HUB_DIR: root } as NodeJS.ProcessEnv, 12_000);
 
-  assert.deepEqual([...summaries.keys()].sort(), accepted.sort());
+  assert.deepEqual(summaries.get("child-1"), { status: "Reviewing docs", stage: "reviewing", updatedAt: 10_000 });
+  assert.deepEqual(summaries.get("child-2"), { status: "Checking tests", updatedAt: 10_000 });
 });
 
 test("readSessionSummaries is disabled without Agent Hub dir", async () => {
