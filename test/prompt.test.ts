@@ -77,6 +77,7 @@ test("buildPiArgs maps agent config to Pi CLI args", () => {
     "--model", "openai/gpt:low",
     "--tools", "read,bash",
     "--no-skills",
+    "--approve",
     "--extension", "/tmp/bootstrap.js",
     "--system-prompt", "/tmp/system.md",
     "@/tmp/task.md",

@@ -92,6 +92,7 @@ export function buildPiArgs(input: {
   addToolArgs(args, agent.tools);
   if (!agent.inheritProjectContext) args.push("--no-context-files");
   if (!agent.inheritSkills) args.push("--no-skills");
+  args.push("--approve");
   args.push("--extension", input.childBootstrapPath);
   args.push(agent.systemPromptMode === "append" ? "--append-system-prompt" : "--system-prompt", input.agentSystemPath);
   args.push(`@${input.taskPath}`);
