@@ -103,8 +103,12 @@ function statusElapsed(status: SubagentStatusResult): string {
   return formatDuration((status.heartbeat?.updatedAt ?? status.job.updatedAt) - status.job.createdAt);
 }
 
+function resultFilePath(status: SubagentStatusResult): string {
+  return status.latestTurn?.resultPath ?? status.job.resultPath;
+}
+
 function resultBasename(status: SubagentStatusResult): string {
-  return basename(status.latestTurn?.resultPath ?? status.job.resultPath);
+  return basename(resultFilePath(status));
 }
 
 function truncateLine(text: string | undefined, max = 100): string | undefined {
@@ -292,6 +296,20 @@ export function formatUserStatus(status: SubagentStatusResult): string {
     lines.push(`   inspect result → ${resultBasename(status)}`);
   } else if ((status.status === "waiting" || status.status === "stopped") && (status.latestTurn || status.latestResult || status.result)) {
     lines.push(`   ✓ result ready → ${resultBasename(status)}`);
+  }
+  return lines.join("\n");
+}
+
+export function formatAgentStatus(status: SubagentStatusResult): string {
+  const lines = formatUserStatus(status).split("\n");
+  if ((status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status)) {
+    const path = resultFilePath(status);
+    lines.push(`   read: ${path}`);
+    lines.push(`   next: read({ path: ${JSON.stringify(path)}, limit: 2000 })`);
+  }
+  if (status.status === "waiting" && status.job.autoStopOnComplete === false) {
+    lines.push("   cleanup: persistent child is idle; stop when done");
+    lines.push(`   stop: tmux_subagent({ action: "stop", childId: "${status.job.id}" })`);
   }
   return lines.join("\n");
 }

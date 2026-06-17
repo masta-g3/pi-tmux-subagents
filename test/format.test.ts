@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatStatus, formatSubagentFooterStatus, formatSubagentPeekWidget, formatSubagentSummaryWidget, formatSubagentWidget, formatUserStatus } from "../src/format.js";
+import { formatAgentStatus, formatStatus, formatSubagentFooterStatus, formatSubagentPeekWidget, formatSubagentSummaryWidget, formatSubagentWidget, formatUserStatus } from "../src/format.js";
 import type { SubagentStatusResult } from "../src/types.js";
 
 function status(overrides: Partial<SubagentStatusResult> = {}): SubagentStatusResult {
@@ -93,6 +93,26 @@ test("formatUserStatus renders lean terminal card with result basename", () => {
     "   ✓ result ready → 001-result.md",
   ].join("\n"));
   assert.doesNotMatch(output, /\/tmp\/jobs/);
+});
+
+test("formatAgentStatus adds model-visible result read hints", () => {
+  const output = formatAgentStatus(status({
+    latestTurn: { index: 1, status: "waiting", startedAt: 100_000, completedAt: 160_000, resultPath: "/tmp/jobs/child-123/turns/001-result.md" },
+  }));
+
+  assert.match(output, /   ✓ result ready → 001-result\.md/);
+  assert.match(output, /   read: \/tmp\/jobs\/child-123\/turns\/001-result\.md/);
+  assert.match(output, /   next: read\(\{ path: "\/tmp\/jobs\/child-123\/turns\/001-result\.md", limit: 2000 \}\)/);
+});
+
+test("formatAgentStatus reminds idle persistent children to stop", () => {
+  const output = formatAgentStatus(status({
+    latestTurn: { index: 1, status: "waiting", startedAt: 100_000, completedAt: 160_000, resultPath: "/tmp/jobs/child-123/turns/001-result.md" },
+    job: { ...status().job, autoStopOnComplete: false },
+  }));
+
+  assert.match(output, /   cleanup: persistent child is idle; stop when done/);
+  assert.match(output, /   stop: tmux_subagent\(\{ action: "stop", childId: "child-123" \}\)/);
 });
 
 test("formatSubagentFooterStatus and widget render live observability summary", () => {

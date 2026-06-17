@@ -344,6 +344,68 @@ test("tmux_subagent exposes runtime auto-stop option enabled by default", () => 
   assert.equal(resolveAutoStopOnComplete(false), false);
 });
 
+test("tmux_subagent get with childId explains child result lookup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-get-child-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "child-get-hint";
+  const turnPath = join(state, "jobs", id, "turns", "001-result.md");
+  mkdirSync(join(state, "jobs", id, "turns"), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "code-critic", taskPreview: "Review", cwd: root, tmuxSession: "missing-session", status: "stopped", resultPath: join(state, "jobs", id, "result.md"), createdAt: 1, updatedAt: 2 }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "result.md"), "LGTM\n");
+  writeFileSync(turnPath, "LGTM\n");
+  writeFileSync(join(state, "jobs", id, "turns", "turns.json"), `${JSON.stringify({ version: 1, turns: [{ index: 1, status: "waiting", startedAt: 1, completedAt: 2, resultPath: turnPath }] }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { action: "get", childId: "child-get" }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /`get` reads agent definitions/);
+    assert.match(result.content[0].text, /tmux_subagent\(\{ action: "status", childId: "child-get-hint" \}\)/);
+    assert.match(result.content[0].text, /read\(\{ path: ".*001-result\.md", limit: 2000 \}\)/);
+  } finally {
+    restorePiEnv();
+  }
+});
+
+test("tmux_subagent send to stopped child points at the result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-send-stopped-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "child-send-stopped";
+  const turnPath = join(state, "jobs", id, "turns", "001-result.md");
+  mkdirSync(join(state, "jobs", id, "turns"), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "code-critic", taskPreview: "Review", cwd: root, tmuxSession: "missing-session", status: "stopped", resultPath: join(state, "jobs", id, "result.md"), createdAt: 1, updatedAt: 2 }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "result.md"), "LGTM\n");
+  writeFileSync(turnPath, "LGTM\n");
+  writeFileSync(join(state, "jobs", id, "turns", "turns.json"), `${JSON.stringify({ version: 1, turns: [{ index: 1, status: "waiting", startedAt: 1, completedAt: 2, resultPath: turnPath }] }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { action: "send", childId: "child-send", message: "again" }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Cannot send to stopped subagent/);
+    assert.match(result.content[0].text, /Result is available at: .*001-result\.md/);
+    assert.match(result.content[0].text, /read\(\{ path: ".*001-result\.md", limit: 2000 \}\)/);
+  } finally {
+    restorePiEnv();
+  }
+});
+
 test("tmux_subagent renders status with active theme tokens", () => {
   let tool: any;
   extension({ registerTool(def: any) { tool = def; }, on() {} } as any);

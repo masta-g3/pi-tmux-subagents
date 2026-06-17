@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
-import { formatSubagentFooterStatus, formatSubagentPeekWidget, formatSubagentSummaryWidget, formatSubagentWidget, formatUserStatus } from "./format.js";
+import { formatAgentStatus, formatSubagentFooterStatus, formatSubagentPeekWidget, formatSubagentSummaryWidget, formatSubagentWidget } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
@@ -348,13 +348,55 @@ function withCleanupNote(result: ToolTextResult, cleanup: CleanupCompletedResult
   if (!note) return result;
   if (typeof result.details === "object" && result.details !== null) {
     const details = { ...result.details, hygieneNote: note };
-    return isStatusResult(details) ? text(formatUserStatus(details), details, result.isError) : text(result.content[0]?.text ?? "", details, result.isError);
+    return isStatusResult(details) ? text(formatAgentStatus(details), details, result.isError) : text(result.content[0]?.text ?? "", details, result.isError);
   }
   return text(result.content[0]?.text ?? "", { details: result.details, hygieneNote: note }, result.isError);
 }
 
 function isStatusResult(value: unknown): value is SubagentStatusResult {
   return typeof value === "object" && value !== null && "job" in value && "status" in value;
+}
+
+function statusResultPath(status: SubagentStatusResult): string | undefined {
+  if (!status.latestTurn && !status.latestResult && !status.result) return undefined;
+  return status.latestTurn?.resultPath ?? status.job.resultPath;
+}
+
+function statusReadCall(status: SubagentStatusResult): string | undefined {
+  const path = statusResultPath(status);
+  return path ? `read({ path: ${JSON.stringify(path)}, limit: 2000 })` : undefined;
+}
+
+function formatChildGetHint(status: SubagentStatusResult): string {
+  return [
+    "`get` reads agent definitions, not launched child jobs.",
+    `For this child, use: tmux_subagent({ action: "status", childId: "${status.job.id}" })`,
+    statusReadCall(status),
+  ].filter(Boolean).join("\n");
+}
+
+function formatStoppedSendHint(status: SubagentStatusResult): string {
+  const path = statusResultPath(status);
+  return [
+    `Cannot send to stopped subagent: ${status.job.id}`,
+    path ? `Result is available at: ${path}` : undefined,
+    statusReadCall(status),
+  ].filter(Boolean).join("\n");
+}
+
+function formatBusySendHint(status: SubagentStatusResult): string {
+  return [
+    `Cannot send to busy subagent ${status.job.id}; wait until it is idle.`,
+    `Check later with: tmux_subagent({ action: "status", childId: "${status.job.id}" })`,
+  ].join("\n");
+}
+
+function formatTimeoutHint(error: unknown, childId?: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/Timed out/.test(message)) return message;
+  return childId
+    ? [`Timed out; child is still alive: ${childId}`, `Check later with: tmux_subagent({ action: "status", childId: "${childId}" })`].join("\n")
+    : ["Timed out; child subagents are still alive.", "Check later with: tmux_subagent({ action: \"status\" })"].join("\n");
 }
 
 export function resolveAutoStopOnComplete(value: boolean | undefined): boolean {
@@ -476,7 +518,14 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       }
 
       if (params.action === "get") {
-        if (!params.agent) return reply('Missing agent for get action. Use action: "get" with agent: "code-critic" to inspect an agent definition. To inspect a launched child/result, use action: "status" with childId.', undefined, true);
+        if (!params.agent) {
+          if (requestedId) {
+            const status = await getSubagentStatus(root, requestedId);
+            if (inNestedSession && !nestedCanAccessJob(status.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
+            return reply(formatChildGetHint(status), status, true);
+          }
+          return reply('Missing agent for get action. Use action: "get" with agent: "code-critic" to inspect an agent definition. To inspect a launched child/result, use action: "status" with childId.', undefined, true);
+        }
         if (inNestedSession && !nestedPolicy.allowlist.includes(params.agent)) return reply(nestedPolicy.allowlist.length ? `Nested agent ${params.agent} is not allowed. Allowed agents: ${nestedPolicy.allowlist.join(", ")}.` : nestedDisabledMessage(), undefined, true);
         const agent = findAgent(cwd, params.agent, scope);
         if (!agent) return reply(`Unknown agent: ${params.agent}`, { available: discoverAgents(cwd, scope).agents.map((a) => a.name) }, true);
@@ -506,7 +555,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         if (inNestedSession && !nestedCanAccessJob(initialStatus.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
         const status = initialStatus.job.autoStopOnComplete ? await autoStopCompletedSubagent(root, initialStatus) : initialStatus;
         trackStatus(status);
-        return reply(formatUserStatus(status), status);
+        return reply(formatAgentStatus(status), status);
       }
 
       if (params.action === "send") {
@@ -516,14 +565,16 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         try {
           const before = await getSubagentStatus(root, id);
           if (inNestedSession && !nestedCanAccessJob(before.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
+          if (before.status === "stopped") return reply(formatStoppedSendHint(before), before, true);
+          if (before.status === "starting" || before.status === "running") return reply(formatBusySendHint(before), before, true);
           let status = await sendSubagentMessage(root, before.job.id, params.message);
           if (params.wait) {
             status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
           }
           trackStatus(status);
-          return reply(formatUserStatus(status), status, status.status === "error");
+          return reply(formatAgentStatus(status), status, status.status === "error");
         } catch (error) {
-          return reply(error instanceof Error ? error.message : String(error), undefined, true);
+          return reply(formatTimeoutHint(error, id), undefined, true);
         }
       }
 
@@ -544,9 +595,9 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
             });
           }
           trackStatus(status);
-          return reply(formatUserStatus(status), status, status.status === "error");
+          return reply(formatAgentStatus(status), status, status.status === "error");
         } catch (error) {
-          return reply(error instanceof Error ? error.message : String(error), undefined, true);
+          return reply(formatTimeoutHint(error, id), undefined, true);
         }
       }
 
@@ -601,12 +652,12 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         signal,
         onUpdate: onUpdate ? (status) => {
           trackStatus(status);
-          onUpdate(text(formatUserStatus(status), status));
+          onUpdate(text(formatAgentStatus(status), status));
         } : undefined,
       });
       const final = autoStopOnComplete ? await autoStopCompletedSubagent(root, waited) : waited;
       trackStatus(final);
-      return reply(formatUserStatus(final), final, final.status === "error");
+      return reply(formatAgentStatus(final), final, final.status === "error");
     },
   });
 }
