@@ -39,6 +39,7 @@ test("child bootstrap records assistant usage on completed turns and heartbeats"
     ] } as any, { cwd: root });
 
     const turns = JSON.parse(await readFile(join(root, "jobs", "child-1", "turns", "turns.json"), "utf8"));
+    assert.equal(turns.turns[0].messagePreview, "done again");
     assert.deepEqual(turns.turns[0].usage, { input: 1500, output: 300, cacheRead: 300, cacheWrite: 40, totalTokens: 2140, cost: { input: 0.0045, output: 0.0045, cacheRead: 0.0003, cacheWrite: 0.00012, total: 0.00942 } });
 
     const heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
@@ -68,6 +69,35 @@ test("child bootstrap records each completed turn and updates the latest result"
     assert.equal(await readFile(resultPath, "utf8"), "second result\n");
     assert.equal(await readFile(join(root, "jobs", "child-1", "turns", "001-result.md"), "utf8"), "first result\n");
     assert.equal(await readFile(join(root, "jobs", "child-1", "turns", "002-result.md"), "utf8"), "second result\n");
+
+    await handlers.session_shutdown?.({ type: "session_shutdown" } as any, { cwd: root });
+  });
+});
+
+test("child bootstrap records and clears ask_question attention", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-attention-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+
+  await withChildEnv(root, resultPath, async () => {
+    const handlers = loadBootstrapHandlers();
+    await handlers.session_start?.({ type: "session_start" } as any, { cwd: root });
+    await handlers.tool_call?.({ toolName: "ask_question", toolCallId: "ask-1", input: { question: "Choose auth path?" } } as any, { cwd: root });
+
+    let heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+    assert.deepEqual(heartbeat.attention, { kind: "question", message: "Choose auth path?", updatedAt: heartbeat.attention.updatedAt, toolCallId: "ask-1" });
+
+    await handlers.tool_result?.({ toolCallId: "ask-1" } as any, { cwd: root });
+    heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+    assert.equal(heartbeat.attention, undefined);
+
+    await handlers.tool_call?.({ toolName: "read", toolCallId: "read-1", input: { path: "README.md" } } as any, { cwd: root });
+    heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+    assert.equal(heartbeat.attention, undefined);
+
+    await handlers.tool_call?.({ toolName: "ask_question", toolCallId: "ask-2", input: { question: "Still proceed?" } } as any, { cwd: root });
+    await handlers.agent_start?.({ type: "agent_start" } as any, { cwd: root });
+    heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+    assert.equal(heartbeat.attention, undefined);
 
     await handlers.session_shutdown?.({ type: "session_shutdown" } as any, { cwd: root });
   });

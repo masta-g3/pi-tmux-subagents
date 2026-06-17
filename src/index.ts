@@ -4,9 +4,12 @@ import { formatAgentStatus, formatSubagentFooterStatus, formatSubagentPeekWidget
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
-import { autoStopCompletedSubagent, cancelSubagent, cleanupCompletedSubagents, getSubagentStatus, launchSubagent, sendSubagentMessage, waitForAnySubagent, waitForSubagent, type CleanupCompletedResult } from "./run.js";
+import { autoStopCompletedSubagent, cancelSubagent, cleanupCompletedSubagents, getSubagentStatus, launchSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent, type CleanupCompletedResult } from "./run.js";
 import { isFreshSessionSummary, readSessionSummaries, SESSION_SUMMARY_STALE_MS, type SessionSummaryMetadata } from "./session-summary.js";
 import { loadJobs } from "./state.js";
+import { createSubagentsLibraryView, formatAgentLibraryList } from "./subagents-library-view.js";
+import { createSubagentsView, type SubagentsViewAction } from "./subagents-view.js";
+import { toSubagentViewRows } from "./view-model.js";
 import type { AgentScope, SubagentStatusResult, TmuxSubagentJob } from "./types.js";
 
 type ToolParams = {
@@ -31,10 +34,16 @@ type ToolParams = {
 
 type PiContext = {
   cwd: string;
+  mode?: string;
   ui?: {
-    theme?: { fg?: (token: any, text: string) => string };
+    theme?: { fg?: (token: any, text: string) => string; bold?: (text: string) => string };
     setStatus?: (key: string, text: string | undefined) => void;
     setWidget?: (key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }) => void;
+    notify?: (message: string, level?: "info" | "warning" | "error") => void;
+    input?: (title: string, placeholder?: string, opts?: any) => Promise<string | undefined>;
+    confirm?: (title: string, message: string, opts?: any) => Promise<boolean>;
+    custom?: any;
+    setEditorText?: (text: string) => void;
   };
 };
 
@@ -156,8 +165,9 @@ function toneWidgetLine(line: string): string {
     : line.startsWith("+") || line.startsWith("╰") ? "dim"
       : /[│ ]  ⎿/.test(line) ? "dim"
         : /✗/.test(line) ? "error"
+          : /✸/.test(line) ? "warning"
           : /⟳/.test(line) ? "accent"
-            : /✓/.test(line) ? "success"
+            : /✓/.test(line) ? "info"
               : "muted";
   return widgetThemeFg(token, line);
 }
@@ -427,6 +437,146 @@ function nestedCanAccessJob(job: { parentId?: string }, childId: string | undefi
   return Boolean(childId && job.parentId === childId);
 }
 
+export interface ParsedSubagentsCommand {
+  verb: string;
+  id?: string;
+  message?: string;
+}
+
+export function parseSubagentsCommand(args: string): ParsedSubagentsCommand {
+  const trimmed = args.trim();
+  if (!trimmed) return { verb: "toggle" };
+  const firstSpace = trimmed.search(/\s/);
+  if (firstSpace === -1) return { verb: trimmed.toLowerCase() };
+  const verb = trimmed.slice(0, firstSpace).toLowerCase();
+  const rest = trimmed.slice(firstSpace).trimStart();
+  if (verb !== "reply") {
+    const [id] = rest.split(/\s+/, 1);
+    return { verb, id };
+  }
+  const idMatch = rest.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  return { verb, id: idMatch?.[1], message: idMatch?.[2] };
+}
+
+async function currentStatuses(root: string): Promise<SubagentStatusResult[]> {
+  const jobs = await loadJobs(root);
+  const selected = selectStatusJobs(jobs.jobs, false);
+  return Promise.all(selected.jobs.map((job) => getSubagentStatus(root, job.id)));
+}
+
+async function handleSubagentsAction(action: SubagentsViewAction | undefined, root: string, ctx: PiContext) {
+  if (!action || action.type === "close") return;
+  if (action.type === "refresh") {
+    ctx.ui?.notify?.("Subagent view refreshed.", "info");
+    return openSubagentsView(root, ctx);
+  }
+  let status: SubagentStatusResult;
+  try {
+    status = await getSubagentStatus(root, action.id);
+  } catch {
+    ctx.ui?.notify?.(`Unknown subagent: ${action.id}`, "error");
+    return;
+  }
+  if (action.type === "attach") {
+    const command = `!tmux attach-session -t ${status.job.tmuxSession}`;
+    ctx.ui?.setEditorText?.(command);
+    ctx.ui?.notify?.(`Attach command ready: ${command}`, "info");
+    return;
+  }
+  if (action.type === "result") {
+    const path = status.latestTurn?.resultPath ?? status.job.resultPath;
+    ctx.ui?.notify?.(`Result: ${path}`, "info");
+    return;
+  }
+  if (action.type === "stop") {
+    const ok = await (ctx.ui?.confirm?.("Stop subagent", `Stop ${status.job.displayName ?? status.job.agentName}?`, { defaultValue: false }) ?? Promise.resolve(true));
+    if (!ok) return;
+    await cancelSubagent(root, status.job.id);
+    ctx.ui?.notify?.(`Stopped ${status.job.id}.`, "info");
+    return;
+  }
+  if (action.type === "reply") {
+    const message = await ctx.ui?.input?.(`Reply to ${status.job.displayName ?? status.job.agentName}`);
+    if (!message) return;
+    await sendSubagentAttentionReply(root, status.job.id, message);
+    ctx.ui?.notify?.(`Sent reply to ${status.job.id}.`, "info");
+  }
+}
+
+async function openSubagentsView(root: string, ctx: PiContext) {
+  if (!ctx.ui?.custom) {
+    ctx.ui?.notify?.("/subagents view requires TUI mode.", "error");
+    return;
+  }
+  const rows = toSubagentViewRows(await currentStatuses(root));
+  const action = await ctx.ui.custom((_tui: any, theme: any, _kb: unknown, done: (value: unknown) => void) => createSubagentsView(rows, theme, done as (value: SubagentsViewAction | undefined) => void));
+  await handleSubagentsAction(action as SubagentsViewAction | undefined, root, ctx);
+}
+
+async function openSubagentsLibrary(cwd: string, ctx: PiContext) {
+  const agents = discoverAgents(cwd, "both").agents;
+  if (!ctx.ui?.custom) {
+    ctx.ui?.notify?.(formatAgentLibraryList(agents), "info");
+    return;
+  }
+  await ctx.ui.custom((_tui: any, theme: any, _kb: unknown, done: (value: unknown) => void) => createSubagentsLibraryView(agents, theme, done as (value: unknown) => void));
+}
+
+async function handleSubagentsSlashCommand(args: string, ctx: PiContext) {
+  const root = stateRoot();
+  const parsed = parseSubagentsCommand(args);
+  if (parsed.verb === "peek") {
+    setWidgetMode("peek");
+    ctx.ui?.notify?.("Subagent peek shown.", "info");
+    return;
+  }
+  if (parsed.verb === "view") return openSubagentsView(root, ctx);
+  if (parsed.verb === "library") return openSubagentsLibrary(ctx.cwd, ctx);
+  if (parsed.verb === "refresh") {
+    const statuses = await currentStatuses(root);
+    statuses.forEach(trackStatus);
+    ctx.ui?.notify?.("Subagent statuses refreshed.", "info");
+    return;
+  }
+  if (parsed.verb === "attach") {
+    if (!parsed.id) return ctx.ui?.notify?.("Usage: /subagents attach <id>", "error");
+    const status = await getSubagentStatus(root, parsed.id);
+    const command = `!tmux attach-session -t ${status.job.tmuxSession}`;
+    ctx.ui?.setEditorText?.(command);
+    ctx.ui?.notify?.(`Attach command ready: ${command}`, "info");
+    return;
+  }
+  if (parsed.verb === "result") {
+    if (!parsed.id) return ctx.ui?.notify?.("Usage: /subagents result <id>", "error");
+    const status = await getSubagentStatus(root, parsed.id);
+    ctx.ui?.notify?.(`Result: ${status.latestTurn?.resultPath ?? status.job.resultPath}`, "info");
+    return;
+  }
+  if (parsed.verb === "stop") {
+    if (!parsed.id) return ctx.ui?.notify?.("Usage: /subagents stop <id>", "error");
+    const status = await getSubagentStatus(root, parsed.id);
+    const ok = await (ctx.ui?.confirm?.("Stop subagent", `Stop ${status.job.displayName ?? status.job.agentName}?`, { defaultValue: false }) ?? Promise.resolve(true));
+    if (!ok) return;
+    const job = await cancelSubagent(root, status.job.id);
+    trackJob(job);
+    ctx.ui?.notify?.(`Stopped ${job.id}.`, "info");
+    return;
+  }
+  if (parsed.verb === "reply") {
+    if (!parsed.id) return ctx.ui?.notify?.("Usage: /subagents reply <id> [message]", "error");
+    let message = parsed.message;
+    if (!message) message = await ctx.ui?.input?.(`Reply to ${parsed.id}`);
+    if (!message) return ctx.ui?.notify?.("No reply sent.", "warning");
+    const status = await sendSubagentAttentionReply(root, parsed.id, message);
+    trackStatus(status);
+    ctx.ui?.notify?.(`Sent reply to ${status.job.id}.`, "info");
+    return;
+  }
+
+  const mode = parsed.verb === "show" || parsed.verb === "on" || parsed.verb === "details" ? (setWidgetMode("details"), "details") : parsed.verb === "hide" || parsed.verb === "off" ? (setWidgetMode("summary"), "summary") : toggleWidgetMode();
+  ctx.ui?.notify?.(`Subagent details ${mode === "summary" ? "hidden" : "shown"}.`, "info");
+}
+
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const ui = (ctx as PiContext).ui;
@@ -460,17 +610,8 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand?.("subagents", {
-    description: "Toggle tmux subagent details widget, or show peek mode with task and optional session summaries",
-    handler: async (args, ctx) => {
-      const arg = args.trim().toLowerCase();
-      if (arg === "peek") {
-        setWidgetMode("peek");
-        ctx.ui?.notify?.("Subagent peek shown.", "info");
-        return;
-      }
-      const mode = arg === "show" || arg === "on" || arg === "details" ? (setWidgetMode("details"), "details") : arg === "hide" || arg === "off" ? (setWidgetMode("summary"), "summary") : toggleWidgetMode();
-      ctx.ui?.notify?.(`Subagent details ${mode === "summary" ? "hidden" : "shown"}.`, "info");
-    },
+    description: "Manage tmux subagents: view, library, reply, stop, attach, result, refresh, details widget, or peek mode",
+    handler: async (args, ctx) => handleSubagentsSlashCommand(args, ctx as unknown as PiContext),
   });
 
   const toggleShortcut = {
@@ -566,8 +707,8 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           const before = await getSubagentStatus(root, id);
           if (inNestedSession && !nestedCanAccessJob(before.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
           if (before.status === "stopped") return reply(formatStoppedSendHint(before), before, true);
-          if (before.status === "starting" || before.status === "running") return reply(formatBusySendHint(before), before, true);
-          let status = await sendSubagentMessage(root, before.job.id, params.message);
+          if ((before.status === "starting" || before.status === "running") && !before.heartbeat?.attention) return reply(formatBusySendHint(before), before, true);
+          let status = before.heartbeat?.attention ? await sendSubagentAttentionReply(root, before.job.id, params.message) : await sendSubagentMessage(root, before.job.id, params.message);
           if (params.wait) {
             status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
           }

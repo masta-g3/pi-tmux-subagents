@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { autoStopCompletedSubagent, cleanupCompletedSubagents, launchSubagent, getSubagentStatus, cancelSubagent, sendSubagentMessage, waitForAnySubagent, waitForSubagent } from "../src/run.js";
+import { autoStopCompletedSubagent, cleanupCompletedSubagents, launchSubagent, getSubagentStatus, cancelSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent } from "../src/run.js";
 import { loadJobs } from "../src/state.js";
 import type { AgentConfig } from "../src/types.js";
 import type { TmuxExecutor } from "../src/tmux.js";
@@ -386,6 +386,31 @@ test("sendSubagentMessage bracket-pastes multiline messages into idle live sessi
     ["send-keys", "-t", job.tmuxSession, "Enter"],
     ["delete-buffer", "-b", bufferName],
   ]);
+}));
+
+test("sendSubagentAttentionReply allows explicit attention while running", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-send-attention-test-"));
+  const calls: string[][] = [];
+  const tmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  };
+  const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+  const jobDir = join(root, "jobs", job.id);
+  await mkdir(jobDir, { recursive: true });
+  await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
+    jobId: job.id,
+    cwd: root,
+    state: "running",
+    stateSince: 2,
+    updatedAt: 3,
+    seenRunning: true,
+    attention: { kind: "question", message: "Choose path", updatedAt: 3, toolCallId: "ask-1" },
+  }), "utf8");
+
+  await sendSubagentAttentionReply(root, job.id, "Use option A", tmux);
+
+  assert.ok(calls.some((args) => args[0] === "set-buffer" && args.includes("Use option A")));
 }));
 
 test("sendSubagentMessage rejects busy sessions", async () => withNoAgentHub(async () => {

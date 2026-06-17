@@ -5,7 +5,7 @@ import { setImmediate as waitImmediate } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import extension, { resolveAutoStopOnComplete } from "../src/index.js";
+import extension, { parseSubagentsCommand, resolveAutoStopOnComplete } from "../src/index.js";
 
 function killTmuxSession(name: string) {
   try {
@@ -303,6 +303,72 @@ test("subagents command supports peek and toggles peek back to summary", async (
     "Subagent details shown.",
     "Subagent details hidden.",
   ]);
+});
+
+test("subagents command parser preserves reply message casing", () => {
+  assert.deepEqual(parseSubagentsCommand("reply child-123 Mixed CASE text"), { verb: "reply", id: "child-123", message: "Mixed CASE text" });
+  assert.deepEqual(parseSubagentsCommand("VIEW"), { verb: "view" });
+});
+
+test("subagents command opens view and library custom UIs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-command-ui-test-"));
+  const restorePiEnv = isolatePiStateEnv(join(root, "agent"));
+  try {
+    let command: any;
+    const customCalls: unknown[] = [];
+    extension({
+      registerTool() {},
+      on() {},
+      registerCommand(name: string, def: any) { if (name === "subagents") command = def; },
+    } as any);
+
+    await command.handler("view", { cwd: root, ui: { custom: async (factory: Function) => { customCalls.push(factory({}, {}, {}, () => undefined)); } } });
+    await command.handler("library", { cwd: root, ui: { custom: async (factory: Function) => { customCalls.push(factory({}, {}, {}, () => undefined)); } } });
+
+    assert.equal(customCalls.length, 2);
+  } finally {
+    restorePiEnv();
+  }
+});
+
+test("subagents view limits historical stopped rows", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-view-history-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  mkdirSync(state, { recursive: true });
+  const jobs = Array.from({ length: 20 }, (_, index) => ({
+    id: `stopped-${String(index + 1).padStart(2, "0")}`,
+    agentName: "scout",
+    displayName: `stopped-${String(index + 1).padStart(2, "0")}`,
+    taskPreview: `Stopped ${index + 1}`,
+    cwd: root,
+    tmuxSession: `missing-stopped-${index + 1}`,
+    status: "stopped",
+    resultPath: join(state, "jobs", `stopped-${index + 1}`, "result.md"),
+    createdAt: index + 1,
+    updatedAt: index + 1,
+  }));
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({ version: 1, jobs }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let command: any;
+    let rendered = "";
+    extension({
+      registerTool() {},
+      on() {},
+      registerCommand(name: string, def: any) { if (name === "subagents") command = def; },
+    } as any);
+
+    await command.handler("view", { cwd: root, ui: { custom: async (factory: Function) => { rendered = factory({}, {}, {}, () => undefined).render(120).join("\n"); } } });
+
+    assert.match(rendered, /stopped-20/);
+    assert.match(rendered, /stopped-16/);
+    assert.doesNotMatch(rendered, /stopped-15/);
+    assert.doesNotMatch(rendered, /stopped-01/);
+  } finally {
+    restorePiEnv();
+  }
 });
 
 test("tmux_subagent exposes persistent send and wait actions", () => {

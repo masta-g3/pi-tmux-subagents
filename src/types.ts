@@ -67,6 +67,13 @@ export interface TmuxSubagentsRegistry {
   jobs: TmuxSubagentJob[];
 }
 
+export interface TmuxSubagentAttention {
+  kind: "question" | "permission" | "blocked";
+  message: string;
+  updatedAt: number;
+  toolCallId?: string;
+}
+
 export interface TmuxSubagentHeartbeat {
   jobId: string;
   cwd: string;
@@ -76,6 +83,7 @@ export interface TmuxSubagentHeartbeat {
   updatedAt: number;
   seenRunning?: boolean;
   usage?: TmuxSubagentUsage;
+  attention?: TmuxSubagentAttention;
 }
 
 export interface TmuxSubagentTurn {

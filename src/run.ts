@@ -198,9 +198,29 @@ export async function sendSubagentMessage(
   message: string,
   tmux: TmuxExecutor = execTmux,
 ): Promise<SubagentStatusResult> {
+  return sendSubagentMessageInternal(root, idOrPrefix, message, false, tmux);
+}
+
+export async function sendSubagentAttentionReply(
+  root: string,
+  idOrPrefix: string,
+  message: string,
+  tmux: TmuxExecutor = execTmux,
+): Promise<SubagentStatusResult> {
+  return sendSubagentMessageInternal(root, idOrPrefix, message, true, tmux);
+}
+
+async function sendSubagentMessageInternal(
+  root: string,
+  idOrPrefix: string,
+  message: string,
+  allowAttentionReply: boolean,
+  tmux: TmuxExecutor,
+): Promise<SubagentStatusResult> {
   const status = await getSubagentStatus(root, idOrPrefix, tmux);
   if (status.status === "stopped") throw new Error(`Cannot send to stopped subagent: ${status.job.id}`);
-  if (status.status === "starting" || status.status === "running") throw new Error(`Cannot send to busy subagent ${status.job.id}; wait until it is idle.`);
+  const busy = status.status === "starting" || status.status === "running";
+  if (busy && (!allowAttentionReply || !status.heartbeat?.attention)) throw new Error(`Cannot send to busy subagent ${status.job.id}; wait until it is idle.`);
   await sendMessage(tmux, status.job.tmuxSession, message);
   return getSubagentStatus(root, status.job.id, tmux);
 }

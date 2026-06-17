@@ -70,6 +70,7 @@ function displayName(status: SubagentStatusResult): string {
 }
 
 function presentationFor(status: SubagentStatusResult): { glyph: string; label: string; title: string } {
+  if (status.heartbeat?.attention && status.status !== "stopped" && status.status !== "error") return { glyph: "✸", label: "needs input", title: "Needs input" };
   return status.status === "waiting" && status.job.autoStopOnComplete === false
     ? { glyph: "✓", label: "idle", title: "Ready" }
     : STATUS_PRESENTATION[status.status];
@@ -139,7 +140,7 @@ export function formatSubagentFooterStatus(statuses: SubagentStatusResult[]): st
       hasCost = true;
     }
   }
-  const order = ["starting", "running", "idle", "error", "done", "stopped"];
+  const order = ["needs input", "starting", "running", "idle", "error", "done", "stopped"];
   const labels = [...order.filter((label) => counts.has(label)), ...[...counts.keys()].filter((label) => !order.includes(label))];
   const summary = labels.map((label) => `${counts.get(label)} ${label}`).join(" · ");
   return [`subagents: ${summary}`, hasCost ? formatCost(totalCost) : undefined].filter(Boolean).join(" · ");
@@ -176,11 +177,12 @@ type SubagentWidgetFormatOptions = {
 };
 
 function statusRank(status: SubagentStatusResult): number {
-  if (status.status === "error") return 0;
-  if (status.status === "starting" || status.status === "running") return 1;
-  if (status.autoStopped) return 2;
-  if (status.status === "waiting" && status.job.autoStopOnComplete === false) return 3;
-  return 4;
+  if (status.heartbeat?.attention && status.status !== "stopped" && status.status !== "error") return 0;
+  if (status.status === "error") return 1;
+  if (status.status === "starting" || status.status === "running") return 2;
+  if (status.autoStopped) return 3;
+  if (status.status === "waiting" && status.job.autoStopOnComplete === false) return 4;
+  return 5;
 }
 
 function sortedWidgetStatuses(statuses: SubagentStatusResult[]): SubagentStatusResult[] {
@@ -226,7 +228,7 @@ export function formatSubagentSummaryWidget(statuses: SubagentStatusResult[], op
       goal ? `  ⎿ goal: ${goal}` : task ? `  ⎿ task: ${task}` : undefined,
       semanticStatus ? `  ⎿ status: ${semanticStatus}` : undefined,
       nextStep ? `  ⎿ next: ${nextStep}` : undefined,
-      "╰─ /subagents details · /subagents peek",
+      "╰─ /subagents view · /subagents details · /subagents peek",
     ].filter((line): line is string => Boolean(line));
   }
 
@@ -243,7 +245,7 @@ export function formatSubagentSummaryWidget(statuses: SubagentStatusResult[], op
   });
   const hidden = ordered.length - visible.length;
   if (hidden > 0) lines.push(`+${hidden} more · /subagents for details`);
-  lines.push("╰─ /subagents details · /subagents peek");
+  lines.push("╰─ /subagents view · /subagents details · /subagents peek");
   return lines;
 }
 

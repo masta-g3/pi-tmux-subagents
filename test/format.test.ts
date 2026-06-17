@@ -153,7 +153,7 @@ test("formatSubagentSummaryWidget renders adaptive single child card with task a
     "  ⎿ goal: Inspect auth flow",
     "  ⎿ status: Reviewing session.ts and middleware.",
     "  ⎿ next: Run auth tests",
-    "╰─ /subagents details · /subagents peek",
+    "╰─ /subagents view · /subagents details · /subagents peek",
   ]);
   assert.doesNotMatch(output!.join("\n"), /\/Users\/manager|model:|attach:|stop:|Pane preview/);
 });
@@ -192,7 +192,7 @@ test("formatSubagentSummaryWidget renders capped multi child list ordered by sev
     "└─ ⟳ scout-extra · running · active 5s ago",
     "   ⎿ task: Extra work",
     "+1 more · /subagents for details",
-    "╰─ /subagents details · /subagents peek",
+    "╰─ /subagents view · /subagents details · /subagents peek",
   ]);
 });
 
@@ -206,8 +206,28 @@ test("formatSubagentSummaryWidget suppresses stale summaries", () => {
     "tmux subagent · background",
     "✓ scout · done",
     "  ⎿ task: Inspect auth",
-    "╰─ /subagents details · /subagents peek",
+    "╰─ /subagents view · /subagents details · /subagents peek",
   ]);
+});
+
+test("formatSubagentSummaryWidget prioritizes explicit attention", () => {
+  const running = status({
+    status: "running",
+    job: { ...status().job, id: "child-running", displayName: "scout-running", status: "running", taskPreview: "Keep working" },
+    heartbeat: { ...status().heartbeat!, jobId: "child-running", state: "running" },
+    result: "",
+  });
+  const attention = status({
+    status: "running",
+    job: { ...status().job, id: "child-attention", displayName: "scout-question", status: "running", taskPreview: "Ask parent" },
+    heartbeat: { ...status().heartbeat!, jobId: "child-attention", state: "running", attention: { kind: "question", message: "Pick one", updatedAt: 160_000 } },
+    result: "",
+  });
+
+  const output = formatSubagentSummaryWidget([running, attention], { now: 162_000 });
+
+  assert.equal(formatSubagentFooterStatus([running, attention]), "subagents: 1 needs input · 1 running");
+  assert.match(output?.join("\n") ?? "", /^tmux subagents · 1 needs input · 1 running\n├─ ✸ scout-question · needs input/m);
 });
 
 test("formatSubagentPeekWidget renders task, summary, and result basename", () => {

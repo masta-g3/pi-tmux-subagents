@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { heartbeatPath, turnResultPath, turnsPath } from "./paths.js";
-import type { TmuxSubagentHeartbeat, TmuxSubagentTurnsRegistry, TmuxSubagentUsage } from "./types.js";
+import type { TmuxSubagentAttention, TmuxSubagentHeartbeat, TmuxSubagentTurnsRegistry, TmuxSubagentUsage } from "./types.js";
 
 type PiContext = { cwd: string };
 type MessageLike = { role?: string; content?: unknown; usage?: Partial<TmuxSubagentUsage> & { cost?: Partial<TmuxSubagentUsage["cost"]> } };
@@ -44,6 +44,24 @@ function roundCost(value: number): number {
   return Math.round(value * 1_000_000_000_000) / 1_000_000_000_000;
 }
 
+function extractToolName(event: unknown): string | undefined {
+  const value = event as { toolName?: unknown; name?: unknown; tool?: { name?: unknown } };
+  return typeof value.toolName === "string" ? value.toolName : typeof value.name === "string" ? value.name : typeof value.tool?.name === "string" ? value.tool.name : undefined;
+}
+
+function extractToolCallId(event: unknown): string | undefined {
+  const value = event as { toolCallId?: unknown; id?: unknown; toolUseId?: unknown };
+  return typeof value.toolCallId === "string" ? value.toolCallId : typeof value.id === "string" ? value.id : typeof value.toolUseId === "string" ? value.toolUseId : undefined;
+}
+
+function extractQuestionMessage(event: unknown): string {
+  const value = event as { input?: unknown; args?: unknown; parameters?: unknown };
+  const input = (typeof value.input === "object" && value.input !== null ? value.input : typeof value.args === "object" && value.args !== null ? value.args : typeof value.parameters === "object" && value.parameters !== null ? value.parameters : {}) as Record<string, unknown>;
+  const direct = [input.question, input.prompt, input.message, input.text].find((item) => typeof item === "string" && item.trim());
+  if (typeof direct === "string") return direct.replace(/\s+/g, " ").trim().slice(0, 240);
+  return "Child session is asking for input.";
+}
+
 function aggregateUsage(messages: MessageLike[] | undefined): TmuxSubagentUsage | undefined {
   const usageMessages = (messages ?? []).filter((message) => message.role === "assistant" && message.usage);
   if (!usageMessages.length) return undefined;
@@ -82,6 +100,7 @@ async function writeTurnResult(stateRoot: string, jobId: string, resultPath: str
   const index = Math.max(0, ...registry.turns.map((turn) => turn.index)) + 1;
   const now = Date.now();
   const path = turnResultPath(stateRoot, jobId, index);
+  const messagePreview = result.replace(/\s+/g, " ").trim().slice(0, 240);
 
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${result}\n`, "utf8");
@@ -89,7 +108,7 @@ async function writeTurnResult(stateRoot: string, jobId: string, resultPath: str
   const usage = aggregateUsage(messages);
   await writeJson(registryPath, {
     version: 1,
-    turns: [...registry.turns, { index, status: "waiting", startedAt: now, completedAt: now, resultPath: path, usage }],
+    turns: [...registry.turns, { index, status: "waiting", startedAt: now, completedAt: now, resultPath: path, messagePreview, usage }],
   });
   return usage;
 }
@@ -109,6 +128,7 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
   let stateSince = Date.now();
   let seenRunning = false;
   let latestUsage: TmuxSubagentUsage | undefined;
+  let attention: TmuxSubagentAttention | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
 
   async function heartbeat(state: TmuxSubagentHeartbeat["state"], ctx: PiContext, message?: string) {
@@ -127,6 +147,7 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
       updatedAt: now,
       seenRunning,
       usage: latestUsage,
+      attention,
     };
     await writeJson(heartbeatPath(stateRoot, jobId), data);
 
@@ -145,6 +166,7 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
         taskPreview: process.env.PI_SUBAGENT_TASK_PREVIEW,
         resultPath: process.env.PI_SUBAGENT_RESULT_PATH,
         usage: latestUsage,
+        attention,
       });
     }
   }
@@ -153,7 +175,21 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     await heartbeat("waiting", ctx as PiContext);
     timer = setInterval(() => void heartbeat(currentState, ctx as PiContext), HEARTBEAT_INTERVAL_MS);
   });
-  pi.on("agent_start", async (_event, ctx) => heartbeat("running", ctx as PiContext));
+  pi.on("agent_start", async (_event, ctx) => {
+    attention = undefined;
+    await heartbeat("running", ctx as PiContext);
+  });
+  pi.on("tool_call", async (event, ctx) => {
+    if (extractToolName(event) !== "ask_question") return;
+    attention = { kind: "question", message: extractQuestionMessage(event), updatedAt: Date.now(), toolCallId: extractToolCallId(event) };
+    await heartbeat(currentState, ctx as PiContext);
+  });
+  pi.on("tool_result", async (event, ctx) => {
+    const toolCallId = extractToolCallId(event);
+    if (!attention || (attention.toolCallId && toolCallId && attention.toolCallId !== toolCallId)) return;
+    attention = undefined;
+    await heartbeat(currentState, ctx as PiContext);
+  });
   pi.on("agent_end", async (event, ctx) => {
     let message: string | undefined;
     try {
