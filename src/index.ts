@@ -167,7 +167,7 @@ function toneWidgetLine(line: string): string {
         : /✗/.test(line) ? "error"
           : /✸/.test(line) ? "warning"
           : /⟳/.test(line) ? "accent"
-            : /✓/.test(line) ? "info"
+            : /✓/.test(line) ? "success"
               : "muted";
   return widgetThemeFg(token, line);
 }
