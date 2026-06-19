@@ -24,14 +24,82 @@ test("subagents view renders groups, peek, lineage, and actions", () => {
   const component = createSubagentsView(rows, {}, (action) => actions.push(action));
 
   const output = component.render(90).join("\n");
-  assert.match(output, /Needs input/);
-  assert.match(output, /Running/);
-  assert.match(output, /Idle/);
-  assert.match(output, /Choose path/);
-  assert.match(output, /attach: tmux attach-session -t tmux-question-child/);
+  assert.match(output, /Needs input \(1\)/);
+  assert.match(output, /Running \(1\)/);
+  assert.match(output, /Idle \(1\)/);
+  assert.match(output, /question: Choose path/);
+  assert.doesNotMatch(output, /attach: tmux attach-session/);
+  assert.match(output, /p peek • r reply • s stop • a attach/);
 
+  component.handleInput("r");
+  assert.deepEqual(actions.at(-1), { type: "reply", id: "question-child" });
+  component.handleInput("a");
+  assert.deepEqual(actions.at(-1), { type: "attach", id: "question-child" });
   component.handleInput("\r");
   assert.deepEqual(actions.at(-1), { type: "attach", id: "question-child" });
+});
+
+test("subagents view carries summary cost and result usage into idle rows", () => {
+  const idle = status("idle-child", {
+    status: "waiting",
+    job: { ...status("idle-child").job, status: "waiting", autoStopOnComplete: false },
+    latestTurn: {
+      index: 1,
+      status: "waiting",
+      startedAt: 1,
+      completedAt: 2,
+      resultPath: "/tmp/idle-child/turns/001-result.md",
+      usage: { input: 10, output: 727, cacheRead: 0, cacheWrite: 0, totalTokens: 737, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+    },
+    usage: { input: 10, output: 727, cacheRead: 0, cacheWrite: 0, totalTokens: 737, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+  });
+  const component = createSubagentsView(toSubagentViewRows([idle], { now: 20_000 }), {}, () => undefined);
+  const output = component.render(120).join("\n");
+
+  assert.match(output, /subagents view · 1 idle · \$0\.01/);
+  assert.match(output, /result 001-result\.md · 727 out · \$0\.01/);
+});
+
+test("subagents view toggles peek and confirms stop for running rows", () => {
+  const rows = toSubagentViewRows([status("run-child")], { now: 20_000 });
+  const actions: unknown[] = [];
+  const component = createSubagentsView(rows, {}, (action) => actions.push(action));
+
+  assert.match(component.render(90).join("\n"), /Peek:/);
+  component.handleInput("p");
+  assert.doesNotMatch(component.render(90).join("\n"), /Peek:/);
+  component.handleInput("p");
+  component.handleInput("s");
+  assert.deepEqual(actions, []);
+  assert.match(component.render(90).join("\n"), /Stop it and nested children\? y confirm/);
+  component.handleInput("n");
+  assert.deepEqual(actions, []);
+  component.handleInput("s");
+  component.handleInput("y");
+  assert.deepEqual(actions.at(-1), { type: "stop", id: "run-child", confirmed: true });
+});
+
+test("subagents view sanitizes peek task paths", () => {
+  const rows = toSubagentViewRows([status("path-child", { job: { ...status("path-child").job, taskPreview: "Inspect /Users/manager/Code/app/src/auth.ts before replying" } })], { now: 20_000 });
+  const component = createSubagentsView(rows, {}, () => undefined);
+  const output = component.render(90).join("\n");
+
+  assert.match(output, /task: Inspect auth\.ts before replying/);
+  assert.doesNotMatch(output, /\/Users\/manager/);
+});
+
+test("subagents view bounds done rows", () => {
+  const doneStatuses = Array.from({ length: 7 }, (_, index) => status(`done-${index}`, {
+    status: "stopped",
+    job: { ...status(`done-${index}`).job, status: "stopped" },
+    latestTurn: { index: 1, status: "waiting", startedAt: 1, completedAt: 2, resultPath: `/tmp/done-${index}/turns/001-result.md` },
+  }));
+  const component = createSubagentsView(toSubagentViewRows(doneStatuses, { now: 20_000 }), {}, () => undefined);
+  const output = component.render(100).join("\n");
+
+  assert.match(output, /Done \(5\)/);
+  assert.match(output, /\+2 more done/);
+  assert.doesNotMatch(output, /done-6/);
 });
 
 test("subagents view handles empty and narrow renders", () => {

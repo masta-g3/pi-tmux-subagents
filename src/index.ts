@@ -489,8 +489,10 @@ async function handleSubagentsAction(action: SubagentsViewAction | undefined, ro
     return;
   }
   if (action.type === "stop") {
-    const ok = await (ctx.ui?.confirm?.("Stop subagent", `Stop ${status.job.displayName ?? status.job.agentName}?`, { defaultValue: false }) ?? Promise.resolve(true));
-    if (!ok) return;
+    if (!action.confirmed) {
+      const ok = await (ctx.ui?.confirm?.("Stop subagent", `Stop ${status.job.displayName ?? status.job.agentName}?`, { defaultValue: false }) ?? Promise.resolve(true));
+      if (!ok) return;
+    }
     await cancelSubagent(root, status.job.id);
     ctx.ui?.notify?.(`Stopped ${status.job.id}.`, "info");
     return;

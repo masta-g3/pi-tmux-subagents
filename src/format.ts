@@ -52,12 +52,16 @@ function lastActivity(status: SubagentStatusResult): string | undefined {
   return `${formatDuration(Date.now() - status.heartbeat.updatedAt)} ago`;
 }
 
+const QUIET_ACTIVITY_MS = 5 * 60_000;
+
 function formatActivityLabel(status: SubagentStatusResult, now = Date.now()): string | undefined {
   if (!status.heartbeat || status.status !== "running" && status.status !== "starting") return undefined;
   const age = Math.max(0, now - status.heartbeat.updatedAt);
   if (age < 1000) return "active now";
   if (age < 60_000) return `active ${Math.floor(age / 1000)}s ago`;
-  return `no activity for ${Math.floor(age / 60_000)}m`;
+  const minutes = Math.floor(age / 60_000);
+  if (age < QUIET_ACTIVITY_MS) return `active ${minutes}m ago`;
+  return `no activity for ${minutes}m`;
 }
 
 function compactName(status: SubagentStatusResult): string {
@@ -140,7 +144,7 @@ export function formatSubagentFooterStatus(statuses: SubagentStatusResult[]): st
       hasCost = true;
     }
   }
-  const order = ["needs input", "starting", "running", "idle", "error", "done", "stopped"];
+  const order = ["needs input", "error", "starting", "running", "idle", "done", "stopped"];
   const labels = [...order.filter((label) => counts.has(label)), ...[...counts.keys()].filter((label) => !order.includes(label))];
   const summary = labels.map((label) => `${counts.get(label)} ${label}`).join(" · ");
   return [`subagents: ${summary}`, hasCost ? formatCost(totalCost) : undefined].filter(Boolean).join(" · ");
@@ -189,11 +193,25 @@ function sortedWidgetStatuses(statuses: SubagentStatusResult[]): SubagentStatusR
   return [...statuses].sort((left, right) => statusRank(left) - statusRank(right) || (right.heartbeat?.updatedAt ?? right.job.updatedAt) - (left.heartbeat?.updatedAt ?? left.job.updatedAt));
 }
 
-function widgetPrimaryDetail(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): string | undefined {
+function freshMetadataFor(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): SessionSummaryMetadata | undefined {
   const metadata = summaries.get(status.job.id);
-  const semanticStatus = metadata && isFreshSessionSummary(metadata, now) ? sanitizeWidgetDetail(metadata.status) : undefined;
+  return metadata && isFreshSessionSummary(metadata, now) ? metadata : undefined;
+}
+
+function stageLabel(metadata: SessionSummaryMetadata | undefined): string | undefined {
+  if (!metadata?.stage || metadata.stage === "unknown") return undefined;
+  return metadata.stage;
+}
+
+function widgetPrimaryDetail(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): string | undefined {
+  const question = sanitizeWidgetDetail(status.heartbeat?.attention?.message);
+  if (question && status.status !== "stopped" && status.status !== "error") return `question: ${question}`;
+  const error = sanitizeWidgetDetail(status.job.error);
+  if (status.status === "error" && error) return `error: ${error}`;
+  const metadata = freshMetadataFor(status, summaries, now);
+  const semanticStatus = sanitizeWidgetDetail(metadata?.status);
   if (semanticStatus) return `status: ${semanticStatus}`;
-  const goal = metadata && isFreshSessionSummary(metadata, now) ? sanitizeWidgetDetail(metadata.goal) : undefined;
+  const goal = sanitizeWidgetDetail(metadata?.goal);
   if (goal) return `goal: ${goal}`;
   const task = sanitizeWidgetDetail(status.job.taskPreview);
   if (task) return `task: ${task}`;
@@ -201,12 +219,13 @@ function widgetPrimaryDetail(status: SubagentStatusResult, summaries: Map<string
   return undefined;
 }
 
-function formatSummaryRow(status: SubagentStatusResult, now: number): string {
+function formatSummaryRow(status: SubagentStatusResult, now: number, metadata?: SessionSummaryMetadata): string {
   const presentation = presentationFor(status);
   const activity = formatActivityLabel(status, now);
   const usage = formatCardUsage(status);
+  const stage = status.status === "running" || status.status === "starting" ? stageLabel(metadata) : undefined;
   const terminalResult = (status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status) ? `result ${resultBasename(status)}` : undefined;
-  return [`${presentation.glyph} ${compactName(status)}`, presentation.label, activity, terminalResult, usage].filter(Boolean).join(" · ");
+  return [`${presentation.glyph} ${compactName(status)}`, presentation.label, stage, activity, terminalResult, usage].filter(Boolean).join(" · ");
 }
 
 export function formatSubagentSummaryWidget(statuses: SubagentStatusResult[], options: SubagentWidgetFormatOptions = {}): string[] | undefined {
@@ -216,30 +235,39 @@ export function formatSubagentSummaryWidget(statuses: SubagentStatusResult[], op
   const ordered = sortedWidgetStatuses(statuses);
   if (ordered.length === 1) {
     const status = ordered[0]!;
-    const metadata = summaries.get(status.job.id);
-    const freshMetadata = metadata && isFreshSessionSummary(metadata, now) ? metadata : undefined;
+    const freshMetadata = freshMetadataFor(status, summaries, now);
+    const question = sanitizeWidgetDetail(status.heartbeat?.attention?.message);
+    const error = sanitizeWidgetDetail(status.job.error);
     const goal = sanitizeWidgetDetail(freshMetadata?.goal);
     const semanticStatus = sanitizeWidgetDetail(freshMetadata?.status);
     const nextStep = sanitizeWidgetDetail(freshMetadata?.nextStep);
     const task = goal ? undefined : sanitizeWidgetDetail(status.job.taskPreview);
+    const detailLines = question && status.status !== "stopped" && status.status !== "error"
+      ? [`  ⎿ question: ${question}`]
+      : status.status === "error" && error
+        ? [`  ⎿ error: ${error}`]
+        : [
+            goal ? `  ⎿ goal: ${goal}` : task ? `  ⎿ task: ${task}` : undefined,
+            semanticStatus ? `  ⎿ status: ${semanticStatus}` : undefined,
+            nextStep ? `  ⎿ next: ${nextStep}` : undefined,
+          ];
     return [
       "tmux subagent · background",
-      formatSummaryRow(status, now),
-      goal ? `  ⎿ goal: ${goal}` : task ? `  ⎿ task: ${task}` : undefined,
-      semanticStatus ? `  ⎿ status: ${semanticStatus}` : undefined,
-      nextStep ? `  ⎿ next: ${nextStep}` : undefined,
+      formatSummaryRow(status, now, freshMetadata),
+      ...detailLines,
       "╰─ /subagents view · /subagents details · /subagents peek",
     ].filter((line): line is string => Boolean(line));
   }
 
   const maxRows = options.maxRows ?? 3;
-  const visible = ordered.slice(0, maxRows);
+  const urgent = ordered.filter((status) => statusRank(status) <= 1);
+  const visible = [...urgent, ...ordered.filter((status) => !urgent.includes(status)).slice(0, Math.max(0, maxRows - urgent.length))];
   const lines = [formatSubagentFooterStatus(statuses)?.replace(/^subagents:/, "tmux subagents ·") ?? "tmux subagents"];
   visible.forEach((status, index) => {
     const last = index === visible.length - 1;
     const branch = last ? "└─" : "├─";
     const detailPrefix = last ? "   ⎿" : "│  ⎿";
-    lines.push(`${branch} ${formatSummaryRow(status, now)}`);
+    lines.push(`${branch} ${formatSummaryRow(status, now, freshMetadataFor(status, summaries, now))}`);
     const detail = widgetPrimaryDetail(status, summaries, now);
     if (detail) lines.push(`${detailPrefix} ${detail}`);
   });
@@ -255,12 +283,12 @@ export function formatSubagentPeekWidget(statuses: SubagentStatusResult[], summa
   return [
     "tmux subagents · peek",
     ...statuses.flatMap((status, index) => {
-      const task = truncateLine(status.job.taskPreview);
+      const task = sanitizeWidgetDetail(status.job.taskPreview);
       const metadata = summaries.get(status.job.id);
       const freshMetadata = metadata && isFreshSessionSummary(metadata) ? metadata : undefined;
-      const goal = truncateLine(freshMetadata?.goal);
-      const semanticStatus = truncateLine(freshMetadata?.status);
-      const nextStep = truncateLine(freshMetadata?.nextStep);
+      const goal = sanitizeWidgetDetail(freshMetadata?.goal);
+      const semanticStatus = sanitizeWidgetDetail(freshMetadata?.status);
+      const nextStep = sanitizeWidgetDetail(freshMetadata?.nextStep);
       return [
         rows[index],
         goal ? `   goal: ${goal}` : task ? `   task: ${task}` : undefined,

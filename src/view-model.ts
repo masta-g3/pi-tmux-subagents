@@ -39,7 +39,7 @@ export const GROUP_LABELS: Record<SubagentPresentationGroup, string> = {
   error: "Error",
 };
 
-const GROUP_ORDER: SubagentPresentationGroup[] = ["needsInput", "running", "idle", "done", "error"];
+const GROUP_ORDER: SubagentPresentationGroup[] = ["needsInput", "error", "running", "idle", "done"];
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(Math.max(0, ms) / 1000);
@@ -97,18 +97,31 @@ function stateFor(group: SubagentPresentationGroup): { glyph: string; label: str
 }
 
 function cleanActivity(text: string | undefined, max = 120): string | undefined {
-  const compact = text?.replace(/\s+/g, " ").trim();
+  const withoutPaths = text?.replace(/(?:~|\/[^\s:;,.)\]}]+(?:\/[^\s:;,.)\]}]+)*)/g, (match) => basename(match));
+  const compact = withoutPaths?.replace(/\s+/g, " ").trim();
   if (!compact) return undefined;
   return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
 }
 
+function stagePrefix(metadata: SessionSummaryMetadata | undefined, now: number): string | undefined {
+  if (!metadata || !isFreshSessionSummary(metadata, now) || !metadata.stage || metadata.stage === "unknown") return undefined;
+  return metadata.stage;
+}
+
 function activityFor(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): string {
-  const attention = cleanActivity(status.heartbeat?.attention?.message);
+  if (status.status === "error") {
+    const error = cleanActivity(status.job.error);
+    if (error) return error;
+  }
+  const attention = status.status !== "stopped" ? cleanActivity(status.heartbeat?.attention?.message) : undefined;
   if (attention) return attention;
   const metadata = summaries.get(status.job.id);
   if (metadata && isFreshSessionSummary(metadata, now)) {
     const semantic = cleanActivity(metadata.status ?? metadata.goal ?? metadata.nextStep);
+    const stage = status.status === "running" || status.status === "starting" ? stagePrefix(metadata, now) : undefined;
+    if (stage && semantic) return `${stage} · ${semantic}`;
     if (semantic) return semantic;
+    if (stage) return stage;
   }
   const turn = cleanActivity(status.latestTurn?.messagePreview);
   if (turn) return turn;
@@ -141,7 +154,7 @@ export function toSubagentViewRows(statuses: SubagentStatusResult[], options: Su
       resultFile: resultFile(status),
       tmuxSession: status.job.tmuxSession,
       attachCommand: `tmux attach-session -t ${status.job.tmuxSession}`,
-      canReply: status.status === "waiting" || Boolean(status.heartbeat?.attention),
+      canReply: group === "idle" || group === "needsInput",
       canStop: status.status !== "stopped",
       canPeek: true,
       parentId: status.job.parentId,

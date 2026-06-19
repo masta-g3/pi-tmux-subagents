@@ -149,7 +149,7 @@ test("formatSubagentSummaryWidget renders adaptive single child card with task a
 
   assert.deepEqual(output, [
     "tmux subagent · background",
-    "⟳ scout-auth · running · active 4s ago · 1.4k out · $0.08",
+    "⟳ scout-auth · running · implementing · active 4s ago · 1.4k out · $0.08",
     "  ⎿ goal: Inspect auth flow",
     "  ⎿ status: Reviewing session.ts and middleware.",
     "  ⎿ next: Run auth tests",
@@ -184,7 +184,7 @@ test("formatSubagentSummaryWidget renders capped multi child list ordered by sev
   const output = formatSubagentSummaryWidget([idle, running, extra, error], { now: 62_000, maxRows: 3 });
 
   assert.deepEqual(output, [
-    "tmux subagents · 2 running · 1 idle · 1 error · $0.03",
+    "tmux subagents · 1 error · 2 running · 1 idle · $0.03",
     "├─ ✗ worker-ui · error · result 001-result.md",
     "│  ⎿ task: Fix UI",
     "├─ ⟳ scout-auth · running · active 4s ago · 200 out · $0.01",
@@ -227,13 +227,49 @@ test("formatSubagentSummaryWidget prioritizes explicit attention", () => {
   const output = formatSubagentSummaryWidget([running, attention], { now: 162_000 });
 
   assert.equal(formatSubagentFooterStatus([running, attention]), "subagents: 1 needs input · 1 running");
-  assert.match(output?.join("\n") ?? "", /^tmux subagents · 1 needs input · 1 running\n├─ ✸ scout-question · needs input/m);
+  const rendered = output?.join("\n") ?? "";
+  assert.match(rendered, /^tmux subagents · 1 needs input · 1 running\n├─ ✸ scout-question · needs input/m);
+  assert.match(rendered, /question: Pick one/);
+});
+
+test("formatSubagentSummaryWidget renders attention and error causes before fallbacks", () => {
+  const attention = status({
+    status: "running",
+    job: { ...status().job, id: "child-attention", displayName: "scout-question", status: "running", taskPreview: "Inspect /Users/manager/Code/app/src/auth.ts" },
+    heartbeat: { ...status().heartbeat!, jobId: "child-attention", state: "running", attention: { kind: "question", message: "Read /Users/manager/Code/app/src/auth.ts or skip?", updatedAt: 160_000 } },
+    result: "",
+  });
+  const error = status({
+    status: "error",
+    job: { ...status().job, id: "child-error", displayName: "worker-ui", status: "error", error: "Failed in /tmp/jobs/child-error/test.log", taskPreview: "Fix /tmp/jobs/child-error/src/ui.ts" },
+    latestTurn: { index: 1, status: "error", startedAt: 1_000, completedAt: 2_000, resultPath: "/tmp/jobs/child-error/turns/001-result.md" },
+  });
+
+  const output = formatSubagentSummaryWidget([status({ status: "running", result: "" }), attention, error], { now: 162_000, maxRows: 2 });
+  const rendered = output?.join("\n") ?? "";
+
+  assert.match(rendered, /question: Read auth\.ts or skip\?/);
+  assert.match(rendered, /error: Failed in test\.log/);
+  assert.doesNotMatch(rendered, /\/Users\/manager|\/tmp\/jobs/);
+  assert.doesNotMatch(rendered, /task: Inspect/);
+});
+
+test("formatSubagentSummaryWidget uses soft long-silence wording", () => {
+  const running = status({
+    status: "running",
+    job: { ...status().job, status: "running", createdAt: 1_000 },
+    heartbeat: { ...status().heartbeat!, state: "running", updatedAt: 2_000 },
+    result: "",
+  });
+
+  assert.match(formatSubagentSummaryWidget([running], { now: 242_000 })?.join("\n") ?? "", /active 4m ago/);
+  assert.match(formatSubagentSummaryWidget([running], { now: 362_000 })?.join("\n") ?? "", /no activity for 6m/);
 });
 
 test("formatSubagentPeekWidget renders task, summary, and result basename", () => {
   const running = status({
     status: "running",
-    job: { ...status().job, displayName: "scout-auth", status: "running", taskPreview: "Inspect auth flow and report risks", createdAt: Date.now() - 159_000 },
+    job: { ...status().job, displayName: "scout-auth", status: "running", taskPreview: "Inspect /Users/manager/Code/app/src/auth.ts and report risks", createdAt: Date.now() - 159_000 },
     heartbeat: { ...status().heartbeat!, state: "running", updatedAt: Date.now() },
     result: "",
   });
@@ -242,19 +278,19 @@ test("formatSubagentPeekWidget renders task, summary, and result basename", () =
     latestTurn: { index: 1, status: "waiting", startedAt: 100_000, completedAt: 160_000, resultPath: "/tmp/jobs/child-456/turns/001-result.md" },
   });
 
-  const output = formatSubagentPeekWidget([running, idle], new Map([[running.job.id, { goal: "Inspect auth flow", status: "Reviewing session handling and auth middleware.", nextStep: "Check token refresh", updatedAt: Date.now() }]]));
+  const output = formatSubagentPeekWidget([running, idle], new Map([[running.job.id, { goal: "Inspect auth flow", status: "Reviewing /Users/manager/Code/app/src/session.ts and auth middleware.", nextStep: "Check token refresh", updatedAt: Date.now() }]]));
 
   assert.deepEqual(output, [
     "tmux subagents · peek",
     "⟳ scout-auth  running  2m39s  0s ago  —",
     "   goal: Inspect auth flow",
-    "   status: Reviewing session handling and auth middleware.",
+    "   status: Reviewing session.ts and auth middleware.",
     "   next: Check token refresh",
     "✓ scout-docs  idle     2m39s  —       —",
     "   task: Check docs coverage",
     "   result: 001-result.md",
   ]);
-  assert.doesNotMatch(output!.join("\n"), /\/tmp\/jobs|model:|attach:|stop:|cleanup:|Pane preview/);
+  assert.doesNotMatch(output!.join("\n"), /\/Users\/manager|\/tmp\/jobs|model:|attach:|stop:|cleanup:|Pane preview/);
 });
 
 test("formatSubagentPeekWidget shows task only when summaries are absent or stale", () => {

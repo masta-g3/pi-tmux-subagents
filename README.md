@@ -97,7 +97,7 @@ Every `tmux_subagent` call also performs a lightweight cleanup sweep: completed 
 
 Unfiltered `action: "status"` is intentionally compact: it shows active/error jobs plus the 5 most recently stopped jobs, then reports how many older stopped jobs are hidden. Pass `includeStopped: true` to inspect the full historical list.
 
-The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact below-editor widget by default for active, errored, persistent-idle, attention-needed, or briefly retained completed children. It shows task previews by default and, when fresh Agent Hub session metadata exists at `session-metadata/<child-id>.json`, reuses compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`) without generating summaries itself. Toggle the per-child details table with `/subagents`, `alt+s`, or `ctrl+alt+s`; use `/subagents show` and `/subagents hide` to set it explicitly. Use `/subagents peek` for the wider task/status/result view. Use `/subagents view` for the interactive manager with grouped rows, peek/details, reply, stop, result, and attach-command actions. Use `/subagents library` to browse available Markdown agents read-only. These widget modes share the same below-editor slot to avoid duplicate status. Widget text refreshes only when displayed text changes.
+The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact below-editor widget by default for active, errored, persistent-idle, attention-needed, or briefly retained completed children. It uses an attention-first hierarchy: explicit child questions and errors get the primary detail line, fresh Agent Hub `session-metadata/<child-id>.json` can add compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`), and task/result text remains the fallback. Long-running children keep heartbeat-age wording conservative (`active …` before later `no activity …` labels); the extension still never generates summaries, calls a model, scrapes panes, or persists raw prompts/output for summaries. Toggle the per-child details table with `/subagents`, `alt+s`, or `ctrl+alt+s`; use `/subagents show` and `/subagents hide` to set it explicitly. Use `/subagents peek` for the wider task/status/result view. Use `/subagents view` for the interactive manager with grouped rows, sanitized peek/details, reply, guarded stop, result, and attach actions. Use `/subagents library` to browse available Markdown agents read-only. These widget modes share the same below-editor slot to avoid duplicate status. Widget text refreshes only when displayed text changes.
 
 Each completed child turn writes a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling. Terminal tool results keep the rendered card compact, but the model-visible text includes the absolute result path plus a ready-to-use `read({ path, limit: 2000 })` hint; idle persistent children also include a `stop` reminder.
 
@@ -114,11 +114,11 @@ tmux subagent scout
 While tracked subagents are active, errored, persistent-idle, or briefly retained after clean auto-stop, the parent session shows the adaptive below-editor widget by default:
 
 ```text
-tmux subagents · 2 running · 1 idle · $0.04
-├─ ⟳ scout-auth · running · active 4s ago · 1.1k out · $0.01
-│  ⎿ status: Reviewing session handling and auth middleware.
-├─ ⟳ worker-ui · running · active 8s ago
-│  ⎿ task: Update subagent widget rendering
+tmux subagents · 1 needs input · 1 running · 1 idle · $0.04
+├─ ✸ scout-auth · needs input
+│  ⎿ question: Choose auth migration path?
+├─ ⟳ worker-ui · running · testing · active 8s ago
+│  ⎿ status: Updating widget rendering tests.
 └─ ✓ scout-docs · idle · result 001-result.md · $0.03
    ⎿ task: Check docs coverage
 ╰─ /subagents view · /subagents details · /subagents peek
@@ -128,7 +128,7 @@ A single child uses the same default widget with a compact card:
 
 ```text
 tmux subagent · background
-⟳ scout-auth · running · active 4s ago · 1.4k out · $0.08
+⟳ scout-auth · running · implementing · active 4s ago · 1.4k out · $0.08
   ⎿ goal: Inspect auth flow
   ⎿ status: Reviewing session handling and auth middleware.
   ⎿ next: Check token refresh.
@@ -143,23 +143,26 @@ tmux subagents
 ✓ scout-cost    idle     58s    —       16.7k/912  $0.02
 ```
 
-Use `/subagents peek` for a wider opt-in task/status/result view. Use `/subagents view` to open the interactive manager:
+Use `/subagents peek` for a wider opt-in task/status/result view. Use `/subagents view` to open the interactive manager; its header carries the same count/cost summary as the widget, and idle/done rows surface result filenames plus usage when available:
 
 ```text
-subagents view · 1 needs input · 2 running · 1 idle
+subagents view · 1 needs input · 1 running · 1 idle · $0.04 ─────────── R refresh
 
-Needs input
+Needs input (1)
 > ✸ scout-auth          Choose auth migration path                         2m
 
-Running
-  ⟳ worker-ui           Updating widget rendering tests                    47s
+Running (1)
+  ⟳ worker-ui           testing · Updating widget rendering tests          47s
+
+Idle (1)
+  ✓ scout-docs          result 001-result.md · 638 out · $0.0092           4m
 
 Peek: scout-auth (scout) · needs input · 2m
+  question: Choose auth migration path
   task: Inspect auth flow
   result: —
-  attach: tmux attach-session -t pi-tmux-subagents-abc123
 
-↑↓ select • space peek • r reply • s stop • a attach cmd • enter result/attach • R refresh • esc close
+↑↓ select • p peek • r reply • s stop • a attach • enter result/attach • R refresh • esc close
 ```
 
 Related slash commands:

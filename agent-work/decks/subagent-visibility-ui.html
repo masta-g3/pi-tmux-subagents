@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subagent visibility UI improvements</title>
+<style>
+:root {
+  --font-display: "Avenir Next", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Avenir Next", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --step--1: clamp(0.80rem, 0.76rem + 0.18vw, 0.93rem);
+  --step-0: clamp(1rem, 0.94rem + 0.28vw, 1.16rem);
+  --step-1: clamp(1.22rem, 1.08rem + 0.58vw, 1.56rem);
+  --step-2: clamp(1.52rem, 1.30rem + 0.96vw, 2.10rem);
+  --step-3: clamp(1.90rem, 1.52rem + 1.55vw, 2.85rem);
+  --step-4: clamp(2.36rem, 1.78rem + 2.45vw, 3.95rem);
+  --sp-1: 0.5rem;
+  --sp-2: 0.75rem;
+  --sp-3: 1rem;
+  --sp-4: 1.5rem;
+  --sp-5: 2.25rem;
+  --sp-6: 3.5rem;
+  --radius: 16px;
+  --measure: 72ch;
+  --slide-max: 1180px;
+  --slide-pad: clamp(1.4rem, 5vw, 5.5rem);
+  --paper: #0d0f12;
+  --raise: #15181d;
+  --raise-2: #1b1f26;
+  --ink: #f1f3f5;
+  --muted: #9aa3ad;
+  --line: #2c323a;
+  --accent: #69d2e7;
+  --accent-soft: rgba(105, 210, 231, 0.12);
+  --warning: #e5c07b;
+  --error: #e06c75;
+  --success: #98c379;
+  --dim: #6f7782;
+  --code-bg: #101318;
+  --shadow: 0 1px 2px rgba(0,0,0,.35), 0 18px 48px rgba(0,0,0,.32);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0;
+  background: radial-gradient(circle at 15% 0%, rgba(105,210,231,.12), transparent 32rem), var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--step-0);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.05; letter-spacing: -0.035em; margin: 0 0 var(--sp-3); }
+h1 { font-size: var(--step-4); max-width: 12ch; }
+h2 { font-size: var(--step-3); }
+h3 { font-size: var(--step-1); }
+p { margin: 0 0 var(--sp-3); }
+strong { color: var(--ink); }
+.skip { position: fixed; left: -999px; top: var(--sp-3); z-index: 100; background: var(--raise); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--sp-2) var(--sp-3); }
+.skip:focus { left: var(--sp-3); }
+.deck { height: 100dvh; overflow-y: auto; scroll-snap-type: y mandatory; }
+.slide { min-height: 100dvh; scroll-snap-align: start; display: grid; place-items: center; padding: var(--slide-pad); border-bottom: 1px solid var(--line); }
+.slide:focus { outline: none; }
+.slide__inner { width: 100%; max-width: var(--slide-max); }
+.slide__inner > * { max-width: var(--measure); }
+.slide__inner.wide > * { max-width: 100%; }
+.kicker { font-family: var(--font-mono); font-size: var(--step--1); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin: 0 0 var(--sp-3); }
+.kicker.muted { color: var(--muted); }
+.lead { color: #c7cdd4; font-size: var(--step-1); max-width: var(--measure); }
+.note { color: var(--muted); margin-top: var(--sp-3); max-width: var(--measure); }
+.grid { display: grid; gap: var(--sp-4); max-width: 100%; }
+.grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.panel { background: linear-gradient(180deg, var(--raise-2), var(--raise)); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: var(--sp-4); }
+.panel--accent { border-color: rgba(105,210,231,.55); background: linear-gradient(180deg, rgba(105,210,231,.12), rgba(105,210,231,.05)); }
+.panel > :last-child { margin-bottom: 0; }
+.deck-title { display: grid; grid-template-columns: .8fr 1.2fr; gap: var(--sp-5); align-items: center; }
+.statement { border-left: 3px solid var(--accent); padding-left: var(--sp-3); color: #d6dde4; }
+.terminal { background: #0b0e12; border: 1px solid #303742; border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+.terminal__bar { display: flex; gap: 7px; align-items: center; height: 34px; border-bottom: 1px solid #252b34; padding: 0 13px; background: #11151b; color: var(--dim); font-family: var(--font-mono); font-size: .78rem; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #515967; }
+.dot:nth-child(1) { background: #e06c75; } .dot:nth-child(2) { background: #e5c07b; } .dot:nth-child(3) { background: #98c379; }
+.terminal__title { margin-left: .45rem; }
+.terminal pre { margin: 0; padding: 1rem 1.1rem 1.1rem; overflow-x: auto; white-space: pre; font-family: var(--font-mono); font-size: clamp(.72rem, .62rem + .42vw, .95rem); line-height: 1.55; color: #dbe1e8; }
+.small pre { font-size: clamp(.66rem, .60rem + .30vw, .83rem); }
+.muted { color: var(--muted); } .dim { color: var(--dim); } .accent { color: var(--accent); } .warn { color: var(--warning); } .err { color: var(--error); } .ok { color: var(--success); }
+.callouts { display: grid; gap: var(--sp-3); }
+.callout { border-left: 3px solid var(--accent); background: rgba(255,255,255,.025); padding: var(--sp-2) var(--sp-3); border-radius: 0 12px 12px 0; }
+.callout.warn { border-color: var(--warning); } .callout.err { border-color: var(--error); }
+.chips { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: var(--sp-3); }
+.chip { display: inline-flex; align-items: center; gap: .35rem; border: 1px solid var(--line); border-radius: 999px; padding: .28rem .62rem; color: #d9e0e7; background: rgba(255,255,255,.035); font-family: var(--font-mono); font-size: var(--step--1); }
+.chip strong { color: var(--accent); }
+.legend { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: var(--sp-3); }
+.legend span { font-family: var(--font-mono); border: 1px solid var(--line); border-radius: 999px; padding: .32rem .65rem; background: rgba(255,255,255,.03); }
+.flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3); }
+.flow .panel { position: relative; min-height: 185px; }
+.flow .num { font-family: var(--font-mono); color: var(--accent); font-size: var(--step--1); letter-spacing: .10em; }
+.spec-list { display: grid; grid-template-columns: max-content 1fr; gap: var(--sp-2) var(--sp-4); margin: 0; }
+.spec-list dt { color: var(--muted); font-family: var(--font-mono); }
+.spec-list dd { margin: 0; }
+.takeaways { display: grid; gap: var(--sp-2); padding-left: 1.15em; }
+.compare-label { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-2); font-family: var(--font-mono); color: var(--muted); font-size: var(--step--1); text-transform: uppercase; letter-spacing: .10em; }
+.progress { position: fixed; inset: 0 0 auto 0; height: 3px; background: var(--accent); transform: scaleX(0); transform-origin: 0 50%; transition: transform 180ms ease; z-index: 50; }
+.counter { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 50; color: var(--muted); background: rgba(21,24,29,.82); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--sp-1) var(--sp-2); font-family: var(--font-mono); font-size: var(--step--1); }
+@media (max-width: 900px) { .grid.two, .grid.three, .deck-title, .flow { grid-template-columns: 1fr; } h1 { max-width: 100%; } }
+@media print {
+  :root { --paper: #fff; --raise: #fff; --raise-2:#fff; --ink:#000; --muted:#444; --line:#ddd; --accent:#006b7f; }
+  body { background: #fff; color: #000; }
+  .deck { height: auto; overflow: visible; scroll-snap-type: none; }
+  .slide { min-height: auto; page-break-after: always; border: 0; padding: 1.5cm; }
+  .terminal { box-shadow: none; }
+  .progress, .counter, .skip { display: none !important; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="progress" id="progress" aria-hidden="true"></div>
+<main class="deck" id="main">
+
+<section class="slide" aria-labelledby="title">
+  <div class="slide__inner wide deck-title">
+    <div>
+      <p class="kicker">Technical briefing</p>
+      <h1 id="title">Subagent visibility UI improvements</h1>
+      <p class="lead">A concise discussion aid for improving how <code>pi-tmux-subagents</code> shows what child agents are doing, while preserving the extension's one-slot, low-surveillance UI constraints.</p>
+      <p class="statement">The widget has only a few lines. Spend them on what is blocked, what broke, and what may be stale.</p>
+    </div>
+    <div class="terminal" aria-label="Current compact subagent widget example">
+      <div class="terminal__bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="terminal__title">current below-editor widget</span></div>
+<pre><span class="muted">tmux subagents · 2 running · 1 idle · $0.04</span>
+├─ <span class="warn">⟳</span> scout-auth · running · active 4s ago · 1.1k out
+│  ⎿ status: Reviewing session handling and auth middleware.
+├─ <span class="warn">⟳</span> worker-ui · running · active 8s ago
+│  ⎿ task: Update subagent widget rendering
+└─ <span class="ok">✓</span> scout-docs · idle · result 001-result.md
+   ⎿ task: Check docs coverage
+<span class="dim">╰─ /subagents view · /subagents details · /subagents peek</span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="slide" aria-labelledby="problem">
+  <div class="slide__inner wide">
+    <p class="kicker">Problem</p>
+    <h2 id="problem">The current UI is compact, but the hierarchy is too flat.</h2>
+    <p class="lead">The code already tracks attention, errors, heartbeat age, usage, result files, and fresh Agent Hub metadata. The display does not yet use that information consistently enough to make scanning easy.</p>
+    <div class="grid two">
+      <div class="terminal small" aria-label="Sparse widget with callouts">
+        <div class="terminal__bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="terminal__title">why it is hard to parse</span></div>
+<pre><span class="muted">tmux subagents · 1 needs input · 2 running</span>
+├─ <span class="warn">✸</span> scout-auth · needs input
+│  ⎿ task: Inspect auth flow
+├─ <span class="warn">⟳</span> worker-ui · running · active 4s ago
+│  ⎿ status: Updating widget rendering tests
+└─ <span class="warn">⟳</span> docs-link · running · active 6m ago
+   ⎿ task: Crawl docs for broken anchors</pre>
+      </div>
+      <div class="callouts">
+        <div class="callout warn"><strong>Blocking context is missing.</strong><br>The default widget can show <code>needs input</code>, but it should also show the actual <code>heartbeat.attention.message</code>.</div>
+        <div class="callout"><strong>Routine and urgent rows look similar.</strong><br><code>✸ needs input</code> and <code>⟳ running</code> need stronger separation in text order, color, and detail choice.</div>
+        <div class="callout"><strong>Motion is ambiguous.</strong><br><code>active 6m ago</code> is technically true, but the user needs to know whether that means normal long-running work or possible stall.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" aria-labelledby="guardrails">
+  <div class="slide__inner wide">
+    <p class="kicker">Guardrails</p>
+    <h2 id="guardrails">Better visibility should not become noisy surveillance.</h2>
+    <p class="lead">The strongest UI direction keeps the existing privacy and lifecycle boundaries visible in the design itself.</p>
+    <div class="grid three">
+      <article class="panel"><h3>One slot</h3><p>Summary, details, peek, and view entry points still replace each other. The parent UI should not accumulate competing status surfaces.</p></article>
+      <article class="panel"><h3>Safe default text</h3><p>Default user-facing rows avoid full paths, raw commands, model names, and pane previews. Result filenames are enough for compact surfaces.</p></article>
+      <article class="panel"><h3>First-class signals only</h3><p><code>needs input</code> comes from explicit <code>heartbeat.attention</code>. Summaries are fresh read-only metadata; no model calls or pane scraping.</p></article>
+    </div>
+    <div class="legend" aria-label="State legend">
+      <span><span class="warn">✸</span> needs input</span>
+      <span><span class="err">✗</span> error</span>
+      <span><span class="accent">⟳</span> running</span>
+      <span><span class="ok">✓</span> idle</span>
+      <span><span class="dim">·</span> done</span>
+    </div>
+  </div>
+</section>
+
+<section class="slide" aria-labelledby="widget-direction">
+  <div class="slide__inner wide">
+    <p class="kicker">Default widget direction</p>
+    <h2 id="widget-direction">Promote blocking states before adding more rows.</h2>
+    <p class="lead">The default widget should answer the first triage question: does any child need the parent, fail, or look stuck?</p>
+    <div class="grid two">
+      <div>
+        <div class="compare-label"><span>Before</span><span>state without cause</span></div>
+        <div class="terminal small">
+          <div class="terminal__bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="terminal__title">attention row today</span></div>
+<pre>├─ <span class="warn">✸</span> scout-auth · needs input
+│  ⎿ task: Inspect auth flow
+├─ <span class="warn">⟳</span> worker-ui · running · active 4s ago
+│  ⎿ task: Update widget rendering</pre>
+        </div>
+      </div>
+      <div>
+        <div class="compare-label"><span>After</span><span>state with action context</span></div>
+        <div class="terminal small">
+          <div class="terminal__bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="terminal__title">attention-first widget</span></div>
+<pre><span class="muted">tmux subagents · 1 needs input · 1 running</span>
+├─ <span class="warn">✸</span> scout-auth · needs input · 2m
+│  ⎿ question: Disable flaky retries, or dig into root cause first?
+└─ <span class="accent">⟳</span> worker-ui · running · testing · active 4s ago
+   ⎿ status: Updating widget rendering tests.
+<span class="dim">╰─ /subagents view · reply scout-auth</span></pre>
+        </div>
+      </div>
+    </div>
+    <div class="chips"><span class="chip"><strong>✓</strong> one slot</span><span class="chip"><strong>✓</strong> attention from heartbeat</span><span class="chip"><strong>✓</strong> no raw pane text</span></div>
+  </div>
+</section>
+
+<section class="slide" aria-labelledby="view-direction">
+  <div class="slide__inner wide">
+    <p class="kicker">Interactive view direction</p>
+    <h2 id="view-direction"><code>/subagents view</code> should feel like a small control room, not a longer table.</h2>
+    <p class="lead">The grouped manager is the right skeleton. It needs stronger row rhythm, truthful key affordances, and a peek panel that carries the same sanitized context as the widget.</p>
+    <div class="terminal" aria-label="Proposed subagents view mockup">
+      <div class="terminal__bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="terminal__title">proposed /subagents view</span></div>
+<pre><span class="muted">subagents view · 1 needs input · 2 running · 1 idle ─────────── R refresh</span>
+
+<span class="muted">Needs input (1)</span>
+&gt; <span class="warn">✸</span> scout-auth      "Disable flaky retries, or root-cause first?"       2m
+
+<span class="muted">Running (2)</span>
+  <span class="accent">⟳</span> worker-ui       testing · updating widget tests                  47s
+  <span class="warn">⟳</span> docs-link       no activity 6m · 118/412 anchors checked            6m
+
+<span class="muted">Peek: scout-auth (scout) · needs input · 2m</span>
+  task: Inspect auth flow
+  result: —
+  <span class="dim">↵ enter result/attach · p peek · r reply · s stop · a attach · esc</span></pre>
+    </div>
+    <div class="chips"><span class="chip"><strong>✓</strong> bounded rows</span><span class="chip"><strong>✓</strong> sanitized peek</span><span class="chip"><strong>✓</strong> explicit controls</span><span class="chip"><strong>✓</strong> stop remains guarded</span></div>
+  </div>
+</section>
+
+<section class="slide" aria-labelledby="signals">
+  <div class="slide__inner wide">
+    <p class="kicker">Signal model</p>
+    <h2 id="signals">Use three signal tiers: intervention, progress, and retrieval.</h2>
+    <p class="lead">This keeps information dense without making the widget verbose. Each tier maps to data the extension already has or reads safely.</p>
+    <div class="flow">
+      <article class="panel panel--accent"><p class="num">01 · Intervention</p><h3>Needs input or error</h3><p>Pin first. Show the question or short error reason. These rows explain why the parent must act.</p></article>
+      <article class="panel"><p class="num">02 · Progress</p><h3>Stage and heartbeat age</h3><p>Show fresh <code>stage</code>/<code>status</code> metadata when present, then activity age. A soft <code>no activity Xm</code> label is useful only when heartbeat silence crosses a clear product threshold, such as five minutes.</p></article>
+      <article class="panel"><p class="num">03 · Retrieval</p><h3>Result filename and usage</h3><p>For done/idle rows, make it easy to know that output exists without printing full result paths in the default UI.</p></article>
+    </div>
+    <div class="grid two" style="margin-top: var(--sp-4);">
+      <article class="panel"><h3>Default widget detail budget</h3><p>Each row gets one primary detail: question or error first, otherwise fresh semantic status, otherwise task/result. Running rows stay concise; richer task, lineage, and attach details belong in <code>/subagents view</code>.</p></article>
+      <article class="panel"><h3>Signal precedence</h3><p><code>heartbeat.attention</code> and job errors override everything. Fresh Agent Hub metadata can explain progress, but it should not mask a stale heartbeat or replace explicit child attention.</p></article>
+    </div>
+    <p class="note">Known source fields: <code>heartbeat.attention</code>, <code>heartbeat.updatedAt</code>, <code>latestTurn.messagePreview</code>, result basenames, usage, and fresh Agent Hub <code>goal/status/nextStep/stage</code>.</p>
+  </div>
+</section>
+
+<section class="slide" aria-labelledby="decision">
+  <div class="slide__inner wide">
+    <p class="kicker">Recommended direction</p>
+    <h2 id="decision">Choose an attention-first dashboard, not a bigger transcript.</h2>
+    <div class="grid two">
+      <article class="panel panel--accent">
+        <h3>Most valuable bundle</h3>
+        <ul class="takeaways">
+          <li>Show actual attention questions and short error reasons in the default widget.</li>
+          <li>Separate <code>needs input</code>, <code>error</code>, <code>running</code>, <code>idle</code>, and <code>done</code> visually and consistently.</li>
+          <li>Let <code>/subagents view</code> handle richer triage: grouped rows, sanitized peek, and truthful action keys.</li>
+        </ul>
+      </article>
+      <article class="panel">
+        <h3>Boundaries to keep</h3>
+        <dl class="spec-list">
+          <dt>Not a pane scraper</dt><dd>Do not infer progress from raw tmux output.</dd>
+          <dt>Not a model summarizer</dt><dd>Only reuse fresh metadata written elsewhere.</dd>
+          <dt>Not a tree browser yet</dt><dd>Lineage can remain a peek/detail field until nested usage is common.</dd>
+          <dt>Not an infinite history</dt><dd>Keep stopped/completed rows bounded and low-salience.</dd>
+        </dl>
+      </article>
+    </div>
+    <p class="note">Grounded in current files: <code>src/format.ts</code>, <code>src/view-model.ts</code>, <code>src/subagents-view.ts</code>, <code>src/session-summary.ts</code>, <code>src/child-bootstrap.ts</code>, and the documented widget constraints in <code>docs/STRUCTURE.md</code>.</p>
+  </div>
+</section>
+
+</main>
+<div class="counter" id="counter" aria-live="polite" aria-atomic="true"></div>
+<script>
+(() => {
+  const deck = document.getElementById('main');
+  const slides = [...deck.querySelectorAll('.slide')];
+  const progress = document.getElementById('progress');
+  const counter = document.getElementById('counter');
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let current = 0;
+  slides.forEach((slide, index) => { slide.id ||= `slide-${index + 1}`; slide.tabIndex = -1; });
+  const update = (index) => {
+    if (!slides.length) return;
+    current = Math.max(0, Math.min(index, slides.length - 1));
+    progress.style.transform = `scaleX(${(current + 1) / slides.length})`;
+    counter.textContent = `${current + 1} / ${slides.length}`;
+  };
+  const go = (index) => {
+    update(index);
+    slides[current].scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth' });
+    slides[current].focus({ preventScroll: true });
+  };
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => { if (entry.isIntersecting) update(slides.indexOf(entry.target)); });
+  }, { threshold: 0.55 });
+  slides.forEach((slide) => observer.observe(slide));
+  addEventListener('keydown', (event) => {
+    if (event.target.matches('input, textarea, select, button, a')) return;
+    switch (event.key) {
+      case 'ArrowDown': case 'ArrowRight': case 'PageDown': case ' ':
+        event.preventDefault(); go(current + 1); break;
+      case 'ArrowUp': case 'ArrowLeft': case 'PageUp':
+        event.preventDefault(); go(current - 1); break;
+      case 'Home': event.preventDefault(); go(0); break;
+      case 'End': event.preventDefault(); go(slides.length - 1); break;
+    }
+  });
+  update(0);
+})();
+</script>
+</body>
+</html>
