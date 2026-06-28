@@ -48,12 +48,15 @@ test("writePromptFiles writes child boundary and task contract under jobs/id", a
 
   assert.equal(paths.agentSystemPath, join(root, "jobs", "child-1", "agent-system.md"));
   assert.equal(paths.taskPath, join(root, "jobs", "child-1", "task.md"));
-  assert.match(await readFile(paths.agentSystemPath, "utf8"), /You are a child subagent/);
-  assert.match(await readFile(paths.agentSystemPath, "utf8"), /You scout\./);
+  const system = await readFile(paths.agentSystemPath, "utf8");
+  assert.match(system, /You are a child subagent/);
+  assert.match(system, /You scout\./);
+  assert.doesNotMatch(system, /Write your final answer to the requested result path/i);
   assert.match(await readFile(paths.taskPath, "utf8"), /Inspect auth carefully/);
   const task = await readFile(paths.taskPath, "utf8");
-  assert.match(task, /Before finishing, write your final response to:/);
-  assert.match(task, /control-plane output, not a project file change/);
+  assert.match(task, /Return your final answer normally/);
+  assert.match(task, /captured automatically/);
+  assert.doesNotMatch(task, /write your final response/i);
 });
 
 test("writePromptFiles includes nested subagent boundary when enabled", async () => {

@@ -51,4 +51,4 @@ Updated `pi-command-center`/`pi-agent-hub` to support optional mirrored subagent
 
 - Restart already-running parent Pi sessions after rebuilding/installing `pi-tmux-subagents`; extension code is loaded at Pi process start.
 - Agent files must start frontmatter at column 1 with `---`.
-- If a child must write `result.md`, its agent config needs a write-capable tool policy such as `tools: write`.
+- Current versions capture `result.md` via child-bootstrap control-plane output; agent configs only need write-capable tools for intentional project file changes.

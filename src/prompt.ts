@@ -10,7 +10,7 @@ The parent owns orchestration, scope decisions, and follow-up work.
 Complete only the assigned task using the tools available to you.
 Do not spawn subagents unless explicitly allowed.
 If blocked on an unapproved product, architecture, or scope decision, write the blocker clearly and stop.
-Write your final answer to the requested result path when one is provided.`;
+Return your final answer normally; the launcher records it to the result path when one is provided.`;
 
 export interface PromptFiles {
   agentSystemPath: string;
@@ -43,10 +43,10 @@ Output:
 - Validation run, if any.
 - Blockers or risks.
 
-Before finishing, write your final response to:
+Return your final answer normally. It will be captured automatically for parent review at:
 ${job.resultPath}
 
-This result file is subagent control-plane output, not a project file change.
+This result file is subagent control-plane output, not a project file change and does not require write access.
 `;
 }
 
