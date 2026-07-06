@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { setImmediate as waitImmediate } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -380,12 +380,50 @@ test("tmux_subagent exposes persistent send and wait actions", () => {
   assert.equal(tool.parameters.properties.message.type, "string");
   assert.equal(tool.parameters.properties.label.type, "string");
   assert.match(tool.parameters.properties.label.description, /worker-auth/);
+  assert.equal(tool.parameters.properties.model.type, "string");
+  assert.match(tool.parameters.properties.model.description, /Override/);
   assert.equal(tool.parameters.properties.includeStopped.type, "boolean");
   assert.match(tool.parameters.properties.includeStopped.description, /historical/);
   assert.equal(tool.parameters.properties.timeoutMs.type, "number");
   assert.match(tool.description, /Prefer background launches/);
   assert.match(tool.parameters.properties.wait.description, /Prefer false/);
   assert.match(tool.parameters.properties.childId.description, /omit to return when any active child completes/);
+});
+
+test("tmux_subagent launch applies one-shot model override", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-model-test-"));
+  const agentDir = join(root, "agent");
+  const binDir = join(root, "bin");
+  const logPath = join(root, "tmux.log");
+  mkdirSync(binDir, { recursive: true });
+  const tmuxPath = join(binDir, "tmux");
+  writeFileSync(tmuxPath, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\nexit 0\n");
+  chmodSync(tmuxPath, 0o755);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  const oldPath = process.env.PATH;
+  const oldTmuxLog = process.env.TMUX_LOG;
+  process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+  process.env.TMUX_LOG = logPath;
+  const handlers = new Map<string, Function>();
+  let tool: any;
+  try {
+    extension({
+      registerTool(def: any) { tool = def; },
+      on(name: string, handler: Function) { handlers.set(name, handler); },
+    } as any);
+    const result = await tool.execute("call", { agent: "scout", task: "Inspect auth", model: " openai-codex/gpt-5.5 ", background: true }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.details.model, "openai-codex/gpt-5.5");
+    assert.match(readFileSync(logPath, "utf8"), /'--model' 'openai-codex\/gpt-5\.5:low'/);
+  } finally {
+    await handlersShutdown(handlers);
+    restorePiEnv();
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    if (oldTmuxLog === undefined) delete process.env.TMUX_LOG;
+    else process.env.TMUX_LOG = oldTmuxLog;
+  }
 });
 
 test("tmux_subagent exposes nested launch controls", () => {

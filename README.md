@@ -75,6 +75,7 @@ You are a focused scouting agent. Report findings clearly and stop.
 tmux_subagent({ action: "list" })
 tmux_subagent({ action: "get", agent: "scout" })
 tmux_subagent({ agent: "scout", task: "Inspect auth flow", label: "scout-auth", background: true })
+tmux_subagent({ agent: "scout", task: "Inspect auth flow", model: "openai-codex/gpt-5.5" }) // one-launch model override
 tmux_subagent({ agent: "code-critic", task: "Review these files", label: "code-critic-api" }) // auto-stops after clean completion by default
 tmux_subagent({ agent: "scout", task: "Keep alive for follow-up", autoStopOnComplete: false })
 tmux_subagent({ agent: "worker", task: "Review with approved specialists", allowNestedSubagents: true, nestedAgentAllowlist: ["code-critic", "plan-critic"] })
@@ -91,7 +92,7 @@ Child sessions auto-stop after clean completion by default so completed subagent
 
 Persistent children support generic follow-up turns through `action: "send"`. By default `send` returns after pasting the message into the live child; pass `wait: true` to wait for the next completed turn. Multiline messages are bracket-pasted with newlines preserved, then submitted once. When a child invokes Pi's explicit `ask_question` flow, the heartbeat carries first-class attention metadata so `send` can answer that running child without treating all busy children as replyable.
 
-Prefer not to block on asynchronous/background subagents. Launch them, do useful parent-side work while they run, then check `status` or use a bounded `wait` only when the parent is truly blocked. `action: "wait"` with `childId` waits for that child to return to an idle/completed state and returns immediately if it is already idle. `action: "wait"` without `childId` waits until any currently active child completes. Both forms support `timeoutMs`; timeouts leave children alive for later inspection or stopping.
+Prefer not to block on asynchronous/background subagents. Launch them, do useful parent-side work while they run, then check `status` or use a bounded `wait` only when the parent is truly blocked. Use the optional launch-only `model` parameter for ephemeral model selection; durable model changes belong in the Markdown agent definition or a same-name user/project override. `action: "wait"` with `childId` waits for that child to return to an idle/completed state and returns immediately if it is already idle. `action: "wait"` without `childId` waits until any currently active child completes. Both forms support `timeoutMs`; timeouts leave children alive for later inspection or stopping.
 
 Use `label` when launching multiple similar agents so dashboards and status output stay distinguishable. Prefer short labels prefixed with the agent type, such as `worker-auth`, `worker-billing`, `scout-api`, or `code-critic-plan`. Labels are display names only; `agent` still selects the underlying agent definition.
 

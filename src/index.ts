@@ -30,6 +30,7 @@ type ToolParams = {
   allowNestedSubagents?: boolean;
   nestedAgentAllowlist?: string[];
   maxNestedDepth?: number;
+  model?: string;
 };
 
 type PiContext = {
@@ -322,7 +323,8 @@ const TmuxSubagentParams = {
     autoStopOnComplete: { type: "boolean", default: true, description: "Stop the tmux session automatically after a clean completion. Default true; set false to keep sessions alive for follow-up. Failures and attention-needed sessions stay alive." },
     allowNestedSubagents: { type: "boolean", default: false, description: "Expose tmux_subagent inside the child for explicitly approved nested specialist agents. Default false." },
     nestedAgentAllowlist: { type: "array", items: { type: "string" }, description: "Agent names the child may launch when allowNestedSubagents is true." },
-    maxNestedDepth: { type: "number", default: 2, description: "Maximum PI_SUBAGENT_DEPTH allowed for launched nested tmux_subagents. Default 2." }
+    maxNestedDepth: { type: "number", default: 2, description: "Maximum PI_SUBAGENT_DEPTH allowed for launched nested tmux_subagents. Default 2." },
+    model: { type: "string", description: "Override the agent's configured model for this launch only, e.g. openai-codex/gpt-5.5. Omit to use the agent definition." }
   }
 } as const;
 
@@ -771,10 +773,11 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       }
 
       const autoStopOnComplete = resolveAutoStopOnComplete(params.autoStopOnComplete);
+      const modelOverride = params.model?.trim();
       const job = await launchSubagent({
         stateRoot: root,
         cwd,
-        agent,
+        agent: modelOverride ? { ...agent, model: modelOverride } : agent,
         task: params.task,
         background: params.background ?? false,
         autoStopOnComplete,

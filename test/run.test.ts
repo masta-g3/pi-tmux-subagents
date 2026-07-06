@@ -72,6 +72,28 @@ test("launchSubagent passes nested subagent policy to child sessions", async () 
   assert.match(command, /'--tools' 'tmux_subagent'/);
 }));
 
+test("launchSubagent persists and passes effective model", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-model-launch-test-"));
+  const calls: string[][] = [];
+  const tmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  };
+
+  const job = await launchSubagent({
+    stateRoot: root,
+    cwd: root,
+    agent: { ...agent, model: "openai-codex/gpt-5.5" },
+    task: "Inspect auth",
+    background: true,
+    tmux,
+  });
+
+  assert.equal(job.model, "openai-codex/gpt-5.5");
+  assert.equal((await loadJobs(root)).jobs.find((item) => item.id === job.id)?.model, "openai-codex/gpt-5.5");
+  assert.match(calls[0]?.at(-1) ?? "", /'--model' 'openai-codex\/gpt-5\.5'/);
+}));
+
 test("launchSubagent persists auto-stop preference", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-autostop-launch-test-"));
   const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
