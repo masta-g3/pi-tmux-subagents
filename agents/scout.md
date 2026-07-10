@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Fast read-only codebase recon for mapping structure, flow, and relevant files
-model: openai-codex/gpt-5.4-mini
+model: openai-codex/gpt-5.6-luna
 thinking: low
 tools: read, bash
 systemPromptMode: replace

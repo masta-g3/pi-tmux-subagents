@@ -1,7 +1,7 @@
 ---
 name: worker
 description: Focused implementation agent for small, approved coding tasks
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: high
 tools: read, bash, edit, write
 systemPromptMode: replace

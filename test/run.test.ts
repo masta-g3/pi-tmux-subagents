@@ -83,15 +83,15 @@ test("launchSubagent persists and passes effective model", async () => withNoAge
   const job = await launchSubagent({
     stateRoot: root,
     cwd: root,
-    agent: { ...agent, model: "openai-codex/gpt-5.5" },
+    agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
     task: "Inspect auth",
     background: true,
     tmux,
   });
 
-  assert.equal(job.model, "openai-codex/gpt-5.5");
-  assert.equal((await loadJobs(root)).jobs.find((item) => item.id === job.id)?.model, "openai-codex/gpt-5.5");
-  assert.match(calls[0]?.at(-1) ?? "", /'--model' 'openai-codex\/gpt-5\.5'/);
+  assert.equal(job.model, "openai-codex/gpt-5.6-sol");
+  assert.equal((await loadJobs(root)).jobs.find((item) => item.id === job.id)?.model, "openai-codex/gpt-5.6-sol");
+  assert.match(calls[0]?.at(-1) ?? "", /'--model' 'openai-codex\/gpt-5\.6-sol'/);
 }));
 
 test("launchSubagent persists auto-stop preference", async () => withNoAgentHub(async () => {

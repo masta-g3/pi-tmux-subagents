@@ -34,8 +34,8 @@ Re-run `npm run build` after local changes, then restart parent Pi sessions that
 
 The package ships with three built-in agents:
 
-- `scout` — fast read-only codebase recon, pinned to `openai-codex/gpt-5.4-mini`.
-- `worker` — focused implementation agent, pinned to `openai-codex/gpt-5.5`.
+- `scout` — fast read-only codebase recon, pinned to `openai-codex/gpt-5.6-luna`.
+- `worker` — focused implementation agent, pinned to `openai-codex/gpt-5.6-sol`.
 - `delegate` — lightweight general helper that inherits the parent model.
 
 Subagent final answers are captured automatically into the control-plane result files; agents only need `edit`/`write` tools when their task should modify or create project files.
@@ -58,7 +58,7 @@ Example:
 ---
 name: scout
 description: Fast codebase recon
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: low
 tools: read, bash
 systemPromptMode: replace
@@ -75,7 +75,7 @@ You are a focused scouting agent. Report findings clearly and stop.
 tmux_subagent({ action: "list" })
 tmux_subagent({ action: "get", agent: "scout" })
 tmux_subagent({ agent: "scout", task: "Inspect auth flow", label: "scout-auth", background: true })
-tmux_subagent({ agent: "scout", task: "Inspect auth flow", model: "openai-codex/gpt-5.5" }) // one-launch model override
+tmux_subagent({ agent: "scout", task: "Inspect auth flow", model: "openai-codex/gpt-5.6-sol" }) // one-launch model override
 tmux_subagent({ agent: "code-critic", task: "Review these files", label: "code-critic-api" }) // auto-stops after clean completion by default
 tmux_subagent({ agent: "scout", task: "Keep alive for follow-up", autoStopOnComplete: false })
 tmux_subagent({ agent: "worker", task: "Review with approved specialists", allowNestedSubagents: true, nestedAgentAllowlist: ["code-critic", "plan-critic"] })

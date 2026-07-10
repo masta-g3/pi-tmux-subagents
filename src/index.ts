@@ -324,7 +324,7 @@ const TmuxSubagentParams = {
     allowNestedSubagents: { type: "boolean", default: false, description: "Expose tmux_subagent inside the child for explicitly approved nested specialist agents. Default false." },
     nestedAgentAllowlist: { type: "array", items: { type: "string" }, description: "Agent names the child may launch when allowNestedSubagents is true." },
     maxNestedDepth: { type: "number", default: 2, description: "Maximum PI_SUBAGENT_DEPTH allowed for launched nested tmux_subagents. Default 2." },
-    model: { type: "string", description: "Override the agent's configured model for this launch only, e.g. openai-codex/gpt-5.5. Omit to use the agent definition." }
+    model: { type: "string", description: "Override the agent's configured model for this launch only, e.g. openai-codex/gpt-5.6-sol. Omit to use the agent definition." }
   }
 } as const;
 

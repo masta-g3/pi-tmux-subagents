@@ -51,7 +51,7 @@ test("discoverAgents includes builtins and lets user agents override them", asyn
   try {
     const agents = discoverAgents(home, "user").agents;
     assert.equal(agents.find((agent) => agent.name === "delegate")?.source, "builtin");
-    assert.equal(agents.find((agent) => agent.name === "worker")?.model, "openai-codex/gpt-5.5");
+    assert.equal(agents.find((agent) => agent.name === "worker")?.model, "openai-codex/gpt-5.6-sol");
     assert.equal(agents.find((agent) => agent.name === "scout")?.description, "custom scout");
     assert.equal(agents.find((agent) => agent.name === "scout")?.source, "user");
   } finally {

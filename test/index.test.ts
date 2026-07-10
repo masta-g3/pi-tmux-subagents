@@ -412,10 +412,10 @@ test("tmux_subagent launch applies one-shot model override", async () => {
       registerTool(def: any) { tool = def; },
       on(name: string, handler: Function) { handlers.set(name, handler); },
     } as any);
-    const result = await tool.execute("call", { agent: "scout", task: "Inspect auth", model: " openai-codex/gpt-5.5 ", background: true }, undefined, undefined, { cwd: root });
+    const result = await tool.execute("call", { agent: "scout", task: "Inspect auth", model: " openai-codex/gpt-5.6-sol ", background: true }, undefined, undefined, { cwd: root });
 
-    assert.equal(result.details.model, "openai-codex/gpt-5.5");
-    assert.match(readFileSync(logPath, "utf8"), /'--model' 'openai-codex\/gpt-5\.5:low'/);
+    assert.equal(result.details.model, "openai-codex/gpt-5.6-sol");
+    assert.match(readFileSync(logPath, "utf8"), /'--model' 'openai-codex\/gpt-5\.6-sol:low'/);
   } finally {
     await handlersShutdown(handlers);
     restorePiEnv();
