@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
 import { formatAgentStatus, formatSubagentFooterStatus, formatSubagentPeekWidget, formatSubagentSummaryWidget, formatSubagentWidget } from "./format.js";
@@ -49,6 +52,7 @@ type PiContext = {
 };
 
 const RECENT_STOPPED_STATUS_LIMIT = 5;
+const PACKAGE_NAME = "pi-tmux-subagents";
 const activeJobs = new Map<string, SubagentStatusResult>();
 let setStatus: ((text: string | undefined) => void) | undefined;
 let setWidget: ((content: string[] | undefined) => void) | undefined;
@@ -295,6 +299,62 @@ function selectStatusJobs(jobs: TmuxSubagentJob[], includeStopped: boolean): { j
   const stopped = sorted.filter((job) => job.status === "stopped");
   const recentStopped = stopped.slice(0, RECENT_STOPPED_STATUS_LIMIT);
   return { jobs: [...active, ...recentStopped].sort(compareRecentJobs), hiddenStopped: stopped.length - recentStopped.length };
+}
+
+type PackageSettingsEntry = string | { source?: string; extensions?: unknown[] };
+
+function packageRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+}
+
+function isNpmPackageRoot(root: string): boolean {
+  return root.split(sep).includes("npm") && root.split(sep).includes("node_modules") && root.endsWith(`${sep}${PACKAGE_NAME}`);
+}
+
+function packageNameAt(root: string): string | undefined {
+  const packageJsonPath = join(root, "package.json");
+  if (!existsSync(packageJsonPath)) return undefined;
+  return (JSON.parse(readFileSync(packageJsonPath, "utf8")) as { name?: string }).name;
+}
+
+function settingsPaths(cwd = process.cwd()): string[] {
+  const userDir = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+  return [join(userDir, "settings.json"), join(cwd, ".pi", "settings.json")];
+}
+
+function packageSource(entry: PackageSettingsEntry): string | undefined {
+  return typeof entry === "string" ? entry : entry.source;
+}
+
+function packageExtensionsEnabled(entry: PackageSettingsEntry): boolean {
+  return typeof entry === "string" || !Array.isArray(entry.extensions) || entry.extensions.length > 0;
+}
+
+function isLocalSource(source: string): boolean {
+  return isAbsolute(source) || source.startsWith("./") || source.startsWith("../");
+}
+
+function enabledLocalPackageRoot(entry: PackageSettingsEntry, settingsPath: string): string | undefined {
+  const source = packageSource(entry);
+  if (!source || !isLocalSource(source) || !packageExtensionsEnabled(entry)) return undefined;
+  return isAbsolute(source) ? source : resolve(dirname(settingsPath), source);
+}
+
+export function shouldSkipNpmPackageForLocalDev(input: { currentRoot: string; settingsFiles: string[] }): boolean {
+  if (!isNpmPackageRoot(input.currentRoot) || packageNameAt(input.currentRoot) !== PACKAGE_NAME) return false;
+  for (const settingsPath of input.settingsFiles) {
+    if (!existsSync(settingsPath)) continue;
+    const entries = (JSON.parse(readFileSync(settingsPath, "utf8")) as { packages?: PackageSettingsEntry[] }).packages ?? [];
+    for (const entry of entries) {
+      const root = enabledLocalPackageRoot(entry, settingsPath);
+      if (root && root !== input.currentRoot && packageNameAt(root) === PACKAGE_NAME) return true;
+    }
+  }
+  return false;
+}
+
+function shouldSkipCurrentNpmPackageForLocalDev(): boolean {
+  return shouldSkipNpmPackageForLocalDev({ currentRoot: packageRoot(), settingsFiles: settingsPaths() });
 }
 
 function formatJobsStatus(jobs: TmuxSubagentJob[], includeStopped: boolean): string {
@@ -582,6 +642,13 @@ async function handleSubagentsSlashCommand(args: string, ctx: PiContext) {
 }
 
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
+  if (shouldSkipCurrentNpmPackageForLocalDev()) {
+    pi.on("session_start", async (_event, ctx) => {
+      (ctx as PiContext).ui?.notify?.("Skipped npm pi-tmux-subagents because a local dev install is enabled.", "warning");
+    });
+    return;
+  }
+
   pi.on("session_start", async (_event, ctx) => {
     const ui = (ctx as PiContext).ui;
     setStatus = ui?.setStatus ? (text) => ui.setStatus?.(STATUS_KEY, text) : undefined;

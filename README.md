@@ -28,7 +28,7 @@ npm test
 pi install "$PWD"
 ```
 
-Re-run `npm run build` after local changes, then restart parent Pi sessions that should use the updated extension.
+Re-run `npm run build` after local changes, then restart parent Pi sessions that should use the updated extension. If both `npm:pi-tmux-subagents` and a local-path install are enabled, the npm-installed copy self-disables so the local checkout can register `tmux_subagent` without a duplicate-tool conflict.
 
 ## Agent files
 

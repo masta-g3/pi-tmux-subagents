@@ -40,7 +40,7 @@ Optional `pi-agent-hub` mirror rows use the child ID and tmux session name, rend
 ## Layout
 
 - `agents/` — packaged built-in agents (`scout`, `worker`, `delegate`) loaded at lowest priority.
-- `src/index.ts` — Pi extension entry point, `tmux_subagent` tool, slash-command actions, parent below-editor widget state, and lightweight status polling.
+- `src/index.ts` — Pi extension entry point, npm/local duplicate-install guard, `tmux_subagent` tool, slash-command actions, parent below-editor widget state, and lightweight status polling.
 - `src/agents.ts` — Markdown frontmatter discovery for built-in, user, and project agents.
 - `src/view-model.ts` — pure grouping, sorting, row projection, activity, result, usage, and lineage presentation helpers shared by widgets and custom views.
 - `src/subagents-view.ts` — custom TUI manager for grouped subagent monitoring and reply/stop/result/attach action intents.

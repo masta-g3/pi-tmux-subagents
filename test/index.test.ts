@@ -5,7 +5,7 @@ import { setImmediate as waitImmediate } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import extension, { parseSubagentsCommand, resolveAutoStopOnComplete } from "../src/index.js";
+import extension, { parseSubagentsCommand, resolveAutoStopOnComplete, shouldSkipNpmPackageForLocalDev } from "../src/index.js";
 
 function killTmuxSession(name: string) {
   try {
@@ -369,6 +369,40 @@ test("subagents view limits historical stopped rows", async () => {
   } finally {
     restorePiEnv();
   }
+});
+
+test("npm install self-disables when an enabled local dev package is configured", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-package-skip-test-"));
+  const npmRoot = join(root, "agent", "npm", "node_modules", "pi-tmux-subagents");
+  const localRoot = join(root, "checkout");
+  const settingsPath = join(root, "agent", "settings.json");
+  mkdirSync(npmRoot, { recursive: true });
+  mkdirSync(localRoot, { recursive: true });
+  mkdirSync(join(root, "agent"), { recursive: true });
+  writeFileSync(join(npmRoot, "package.json"), JSON.stringify({ name: "pi-tmux-subagents" }));
+  writeFileSync(join(localRoot, "package.json"), JSON.stringify({ name: "pi-tmux-subagents" }));
+  writeFileSync(settingsPath, JSON.stringify({ packages: [localRoot] }));
+
+  assert.equal(shouldSkipNpmPackageForLocalDev({ currentRoot: npmRoot, settingsFiles: [settingsPath] }), true);
+});
+
+test("npm install does not self-disable for filtered or non-local packages", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-package-noskip-test-"));
+  const npmRoot = join(root, "agent", "npm", "node_modules", "pi-tmux-subagents");
+  const localRoot = join(root, "checkout");
+  const settingsPath = join(root, "agent", "settings.json");
+  mkdirSync(npmRoot, { recursive: true });
+  mkdirSync(localRoot, { recursive: true });
+  mkdirSync(join(root, "agent"), { recursive: true });
+  writeFileSync(join(npmRoot, "package.json"), JSON.stringify({ name: "pi-tmux-subagents" }));
+  writeFileSync(join(localRoot, "package.json"), JSON.stringify({ name: "pi-tmux-subagents" }));
+  writeFileSync(settingsPath, JSON.stringify({ packages: [
+    { source: localRoot, extensions: [] },
+    "npm:pi-tmux-subagents",
+  ] }));
+
+  assert.equal(shouldSkipNpmPackageForLocalDev({ currentRoot: npmRoot, settingsFiles: [settingsPath] }), false);
+  assert.equal(shouldSkipNpmPackageForLocalDev({ currentRoot: localRoot, settingsFiles: [settingsPath] }), false);
 });
 
 test("tmux_subagent exposes persistent send and wait actions", () => {
