@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { SYSTEM_PROMPT_APPEND_MAX_LENGTH } from "./names.js";
 import { agentSystemPath, taskPath } from "./paths.js";
 import type { AgentConfig, AgentTools, ThinkingLevel, TmuxSubagentJob } from "./types.js";
 
@@ -50,16 +51,22 @@ This result file is subagent control-plane output, not a project file change and
 `;
 }
 
-export async function writePromptFiles(root: string, job: TmuxSubagentJob, agent: AgentConfig, task: string): Promise<PromptFiles> {
+export async function writePromptFiles(root: string, job: TmuxSubagentJob, agent: AgentConfig, task: string, systemPromptAppend?: string): Promise<PromptFiles> {
   const systemPath = agentSystemPath(root, job.id);
   const taskFile = taskPath(root, job.id);
   const nestedInstruction = job.allowNestedSubagents
     ? `\nNested subagent launches are allowed only for explicitly requested specialist review/delegation, and only for: ${(job.nestedAgentAllowlist?.length ? job.nestedAgentAllowlist.join(", ") : "none")}. The parent remains the top-level orchestrator.\n`
     : "";
+  const appendix = boundedSystemPromptAppend(systemPromptAppend);
   await mkdir(dirname(systemPath), { recursive: true });
-  await writeFile(systemPath, `${CHILD_BOUNDARY}\n\n${agent.systemPrompt.trim()}${nestedInstruction}\n`, "utf8");
+  await writeFile(systemPath, `${CHILD_BOUNDARY}\n\n${agent.systemPrompt.trim()}${nestedInstruction}${appendix ? `\n\n${appendix}` : ""}\n`, "utf8");
   await writeFile(taskFile, taskContract(job, task), "utf8");
   return { agentSystemPath: systemPath, taskPath: taskFile };
+}
+
+export function boundedSystemPromptAppend(value: string | undefined): string | undefined {
+  const appendix = value?.trim();
+  return appendix && appendix.length <= SYSTEM_PROMPT_APPEND_MAX_LENGTH ? appendix : undefined;
 }
 
 function addToolArgs(args: string[], tools: AgentTools | undefined): void {

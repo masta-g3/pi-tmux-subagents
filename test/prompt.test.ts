@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { SYSTEM_PROMPT_APPEND_MAX_LENGTH } from "../src/names.js";
 import { applyThinkingSuffix, buildPiArgs, writePromptFiles } from "../src/prompt.js";
 import type { AgentConfig, TmuxSubagentJob } from "../src/types.js";
 
@@ -57,6 +58,24 @@ test("writePromptFiles writes child boundary and task contract under jobs/id", a
   assert.match(task, /Return your final answer normally/);
   assert.match(task, /captured automatically/);
   assert.doesNotMatch(task, /write your final response/i);
+});
+
+test("writePromptFiles appends bounded opaque parent guidance in both prompt modes", async () => {
+  for (const systemPromptMode of ["replace", "append"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `pi-tmux-prompt-append-${systemPromptMode}-`));
+    const paths = await writePromptFiles(root, job(root), { ...agent, systemPromptMode }, "Inspect auth", "  ## Parent context\nUse the isolated worktree.  ");
+    const system = await readFile(paths.agentSystemPath, "utf8");
+
+    assert.match(system, /You scout\.\n\n## Parent context\nUse the isolated worktree\.\n$/);
+  }
+});
+
+test("writePromptFiles omits blank and oversized parent guidance", async () => {
+  for (const appendix of ["   ", "x".repeat(SYSTEM_PROMPT_APPEND_MAX_LENGTH + 1)]) {
+    const root = mkdtempSync(join(tmpdir(), "pi-tmux-prompt-append-omit-"));
+    const paths = await writePromptFiles(root, job(root), agent, "Inspect auth", appendix);
+    assert.equal((await readFile(paths.agentSystemPath, "utf8")).endsWith("You scout.\n"), true);
+  }
 });
 
 test("writePromptFiles includes nested subagent boundary when enabled", async () => {

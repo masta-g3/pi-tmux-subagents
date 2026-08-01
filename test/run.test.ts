@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { autoStopCompletedSubagent, cleanupCompletedSubagents, launchSubagent, getSubagentStatus, cancelSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent } from "../src/run.js";
+import { SYSTEM_PROMPT_APPEND_ENV } from "../src/names.js";
 import { loadJobs } from "../src/state.js";
 import type { AgentConfig } from "../src/types.js";
 import type { TmuxExecutor } from "../src/tmux.js";
@@ -40,7 +41,31 @@ test("launchSubagent creates standalone job and tmux session", async () => withN
   assert.match(calls[0]?.at(-1) ?? "", /PI_TMUX_SUBAGENTS_JOB_ID=/);
   assert.match(calls[0]?.at(-1) ?? "", /PI_SUBAGENT_DISPLAY_NAME='scout-auth'/);
   assert.match(calls[0]?.at(-1) ?? "", /PI_AGENT_HUB_SESSION_ID=''/);
+  assert.doesNotMatch(calls[0]?.at(-1) ?? "", new RegExp(`${SYSTEM_PROMPT_APPEND_ENV}=`));
   assert.match(calls[0]?.at(-1) ?? "", /--extension/);
+}));
+
+test("launchSubagent appends and forwards generic parent guidance", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-prompt-bridge-test-"));
+  const calls: string[][] = [];
+  const tmux: TmuxExecutor = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  };
+  const previous = process.env[SYSTEM_PROMPT_APPEND_ENV];
+  process.env[SYSTEM_PROMPT_APPEND_ENV] = "## Worktree context\nUse /hub/worktree, not /repo/source.";
+  try {
+    const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
+    const systemPrompt = await readFile(join(root, "jobs", job.id, "agent-system.md"), "utf8");
+    const command = calls[0]?.at(-1) ?? "";
+
+    assert.match(systemPrompt, /## Worktree context\nUse \/hub\/worktree, not \/repo\/source\./);
+    assert.match(command, new RegExp(`${SYSTEM_PROMPT_APPEND_ENV}=`));
+    assert.match(command, /Use \/hub\/worktree, not \/repo\/source\./);
+  } finally {
+    if (previous === undefined) delete process.env[SYSTEM_PROMPT_APPEND_ENV];
+    else process.env[SYSTEM_PROMPT_APPEND_ENV] = previous;
+  }
 }));
 
 test("launchSubagent passes nested subagent policy to child sessions", async () => withNoAgentHub(async () => {
@@ -603,8 +628,10 @@ test("cancelSubagent kills tmux and marks job stopped", async () => withNoAgentH
 async function withNoAgentHub(fn: () => Promise<void>): Promise<void> {
   const oldDir = process.env.PI_AGENT_HUB_DIR;
   const oldId = process.env.PI_AGENT_HUB_SESSION_ID;
+  const oldPromptAppend = process.env[SYSTEM_PROMPT_APPEND_ENV];
   delete process.env.PI_AGENT_HUB_DIR;
   delete process.env.PI_AGENT_HUB_SESSION_ID;
+  delete process.env[SYSTEM_PROMPT_APPEND_ENV];
   try {
     await fn();
   } finally {
@@ -612,6 +639,8 @@ async function withNoAgentHub(fn: () => Promise<void>): Promise<void> {
     else process.env.PI_AGENT_HUB_DIR = oldDir;
     if (oldId === undefined) delete process.env.PI_AGENT_HUB_SESSION_ID;
     else process.env.PI_AGENT_HUB_SESSION_ID = oldId;
+    if (oldPromptAppend === undefined) delete process.env[SYSTEM_PROMPT_APPEND_ENV];
+    else process.env[SYSTEM_PROMPT_APPEND_ENV] = oldPromptAppend;
   }
 }
 

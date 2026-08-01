@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
 import { detectAgentHubMirror, mirroredTmuxSessionName, mirrorJobToAgentHub, removeMirroredJob, removeMirroredJobs, updateMirroredJobStatus } from "./pi-agent-hub-adapter.js";
-import { buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
-import { TMUX_SESSION_PREFIX } from "./names.js";
+import { boundedSystemPromptAppend, buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
+import { SYSTEM_PROMPT_APPEND_ENV, TMUX_SESSION_PREFIX } from "./names.js";
 import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot, turnsPath } from "./paths.js";
 import { loadJobs, resolveJob, updateJob, updateJobs, upsertJob } from "./state.js";
 import { capturePane, execTmux, killSession, newTmuxSession, sendMessage, sessionExists, type TmuxExecutor } from "./tmux.js";
@@ -120,7 +120,8 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     maxNestedDepth: input.allowNestedSubagents ? input.maxNestedDepth ?? 2 : undefined,
   };
 
-  const promptFiles = await writePromptFiles(root, job, input.agent, input.task);
+  const systemPromptAppend = boundedSystemPromptAppend(process.env[SYSTEM_PROMPT_APPEND_ENV]);
+  const promptFiles = await writePromptFiles(root, job, input.agent, input.task, systemPromptAppend);
   mkdirSync(dirname(metadataPath(root, id)), { recursive: true });
   await writeFile(metadataPath(root, id), `${JSON.stringify({ job, agent: input.agent }, null, 2)}\n`, "utf8");
   await upsertJob(root, job);
@@ -144,6 +145,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     PI_SUBAGENT_DEPTH: String(Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) + 1),
     PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST: input.allowNestedSubagents ? (input.nestedAgentAllowlist ?? []).join(",") : "",
     PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH: input.allowNestedSubagents ? String(input.maxNestedDepth ?? 2) : "",
+    [SYSTEM_PROMPT_APPEND_ENV]: systemPromptAppend,
     PI_AGENT_HUB_DIR: "",
     PI_AGENT_HUB_SESSION_ID: "",
     PI_AGENT_HUB_PARENT_ID: "",

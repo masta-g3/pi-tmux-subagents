@@ -25,6 +25,8 @@ flowchart TD
 
 Standalone state is the source of truth under `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset. `pi-agent-hub` mirroring is optional and adapter-based; normal operation must not require hub state.
 
+A parent process can supply up to 8,192 characters of opaque child guidance through `PI_TMUX_SUBAGENTS_SYSTEM_PROMPT_APPEND`. The launcher appends a bounded nonblank value after the normal child system instructions and forwards it in the child's explicit environment so nested launches enabled by the package's nesting policy receive the same guidance. This package does not parse the text or depend on Hub; without the variable, prompt generation and launch behavior are unchanged.
+
 ## Lifecycle
 
 Child Pi sessions auto-stop after clean completion by default so completed subagents do not clutter tmux or `pi-agent-hub` dashboards. Completion is represented as `waiting` after the child has been `running`; foreground runs then stop automatically, and background runs stop when a later `status` call or parent UI poll observes clean completion. Successful auto-stop also removes the mirrored `pi-agent-hub` subagent row. Pass `autoStopOnComplete: false` to keep a child alive for inspection, attach, or follow-up turns, then use `tmux_subagent({ action: "send", childId, message, wait })`, `tmux_subagent({ action: "wait", childId })`, `tmux_subagent({ action: "wait" })` to wait for any active child, and finally `tmux_subagent({ action: "stop", childId })` when done. Failed/interrupted sessions stay alive for inspection. `cancel` remains as a compatibility alias for the same shutdown behavior.
