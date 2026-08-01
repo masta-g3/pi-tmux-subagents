@@ -100,11 +100,11 @@ Every `tmux_subagent` call also performs a lightweight cleanup sweep: completed 
 
 Unfiltered `action: "status"` is intentionally compact: it shows active/error jobs plus the 5 most recently stopped jobs, then reports how many older stopped jobs are hidden. Pass `includeStopped: true` to inspect the full historical list.
 
-The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact below-editor widget by default for active, errored, persistent-idle, attention-needed, or briefly retained completed children. It uses an attention-first hierarchy: explicit child questions and errors get the primary detail line, fresh Agent Hub `session-metadata/<child-id>.json` can add compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`), and task/result text remains the fallback. Long-running children keep heartbeat-age wording conservative (`active …` before later `no activity …` labels); the extension still never generates summaries, calls a model, scrapes panes, or persists raw prompts/output for summaries. Toggle the per-child details table with `/subagents`, `alt+s`, or `ctrl+alt+s`; use `/subagents show` and `/subagents hide` to set it explicitly. Use `/subagents peek` for the wider task/status/result view. Use `/subagents view` for the interactive manager with grouped rows, sanitized peek/details, reply, guarded stop, result, and attach actions. Use `/subagents library` to browse available Markdown agents read-only. These widget modes share the same below-editor slot to avoid duplicate status. Widget text refreshes only when displayed text changes.
+The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact, width-aware below-editor widget for active, errored, persistent-idle, attention-needed, or briefly retained completed children. Questions and errors sort first and receive semantic color; routine states stay neutral. Fresh Agent Hub `session-metadata/<child-id>.json` can provide compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`), with turn/result/task text as fallback. Ages continue updating even after active polling stops. The extension still never generates summaries, calls a model, scrapes panes, or persists raw prompts/output for summaries. Open the live interactive manager with `/subagents`, `/subagents view`, `alt+s`, or `ctrl+alt+s`; use `/subagents library` to browse available Markdown agents read-only.
 
 Each completed child turn captures the final assistant message into a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling. This control-plane capture is handled by the child bootstrap and does not require the agent to have project file write access. Terminal tool results keep the rendered card compact, but the model-visible text includes the absolute result path plus a ready-to-use `read({ path, limit: 2000 })` hint; idle persistent children also include a `stop` reminder.
 
-Nested tmux subagents are disabled by default. Set `allowNestedSubagents: true` plus `nestedAgentAllowlist` to expose `tmux_subagent` inside the child for explicitly requested specialist agents; nested children do not receive nested-launch permission by default. Use `maxNestedDepth` to cap allowed child launch depth. The interactive view keeps parent lineage available in row details/peek when the job has a `parentId`; full tree rendering is intentionally deferred so attention and errors remain top-level scannable.
+Nested tmux subagents are disabled by default. Set `allowNestedSubagents: true` plus `nestedAgentAllowlist` to expose `tmux_subagent` inside the child for explicitly requested specialist agents; nested children do not receive nested-launch permission by default. Use `maxNestedDepth` to cap allowed child launch depth. The interactive manager keeps parent lineage available in selected-row details when the job has a `parentId`; full tree rendering is intentionally deferred so attention and errors remain top-level scannable.
 
 Foreground runs and explicit status calls render a compact parent-session summary:
 
@@ -114,63 +114,45 @@ tmux subagent scout
    ✓ result ready → 001-result.md
 ```
 
-While tracked subagents are active, errored, persistent-idle, or briefly retained after clean auto-stop, the parent session shows the adaptive below-editor widget by default:
+While tracked subagents are active, errored, persistent-idle, or briefly retained after clean auto-stop, the parent session shows the ambient process ledger:
 
 ```text
-tmux subagents · 1 needs input · 1 running · 1 idle · $0.04
-├─ ✸ scout-auth · needs input
-│  ⎿ question: Choose auth migration path?
-├─ ⟳ worker-ui · running · testing · active 8s ago
-│  ⎿ status: Updating widget rendering tests.
-└─ ✓ scout-docs · idle · result 001-result.md · $0.03
-   ⎿ task: Check docs coverage
-╰─ /subagents view · /subagents details · /subagents peek
+subagents · 1 needs input · 1 running · 1 idle · $0.04
+✸ scout-auth   Choose auth migration path?                  2m
+⟳ worker-ui    testing · Updating widget tests               8s
+✓ scout-docs   result 001-result.md                           4m
 ```
 
-A single child uses the same default widget with a compact card:
+The widget caps visible rows and links to `/subagents` only when jobs are hidden. At narrow widths it gives identity and intervention text priority over age and usage. It hides while the manager is open so the same jobs are never rendered twice, then returns when the manager closes.
+
+`/subagents` opens the live manager. It refreshes every three seconds, keeps selection by child ID when rows reorder, and also supports `R` for an immediate in-place refresh:
 
 ```text
-tmux subagent · background
-⟳ scout-auth · running · implementing · active 4s ago · 1.4k out · $0.08
-  ⎿ goal: Inspect auth flow
-  ⎿ status: Reviewing session handling and auth middleware.
-  ⎿ next: Check token refresh.
-╰─ /subagents view · /subagents details · /subagents peek
+Subagents · 1 needs input · 1 running · 1 idle · $0.04
+────────────────────────────────────────────────────────────
+
+Needs input  1
+> ✸ scout-auth       Choose auth migration path?             2m
+
+Running  1
+  ⟳ worker-ui        testing · Updating widget tests         47s
+
+Idle  1
+  ✓ scout-docs       result 001-result.md                     4m
+
+────────────────────────────────────────────────────────────
+scout-auth · needs input · 2m
+Choose auth migration path?
+
+enter reply · s stop · a attach · R refresh · esc close
 ```
 
-Toggle details with `/subagents`, `alt+s`, or `ctrl+alt+s` to replace the adaptive widget with the per-child table:
-
-```text
-tmux subagents
-⟳ scout-render  running  1m12s  5s ago  9.2k/1.1k  $0.01
-✓ scout-cost    idle     58s    —       16.7k/912  $0.02
-```
-
-Use `/subagents peek` for a wider opt-in task/status/result view. Use `/subagents view` to open the interactive manager; its header carries the same count/cost summary as the widget, and idle/done rows surface result filenames plus usage when available:
-
-```text
-subagents view · 1 needs input · 1 running · 1 idle · $0.04 ─────────── R refresh
-
-Needs input (1)
-> ✸ scout-auth          Choose auth migration path                         2m
-
-Running (1)
-  ⟳ worker-ui           testing · Updating widget rendering tests          47s
-
-Idle (1)
-  ✓ scout-docs          result 001-result.md · 638 out · $0.0092           4m
-
-Peek: scout-auth (scout) · needs input · 2m
-  question: Choose auth migration path
-  task: Inspect auth flow
-  result: —
-
-↑↓ select • p peek • r reply • s stop • a attach • enter result/attach • R refresh • esc close
-```
+Enter follows the selected row's primary workflow: reply to needs-input or persistent-idle children, disclose details for running/error rows, and show a bounded sanitized result excerpt for completed rows. `o` exposes a result path on demand; stop remains guarded for running children.
 
 Related slash commands:
 
 ```text
+/subagents
 /subagents view
 /subagents library
 /subagents reply <id> [message]

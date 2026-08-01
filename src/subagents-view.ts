@@ -1,124 +1,176 @@
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { GROUP_LABELS, groupCountSummary, groupSubagentRows, sortSubagentRows, type SubagentViewRow } from "./view-model.js";
+import { basename } from "node:path";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { SUBAGENT_UI } from "./ui-tokens.js";
+import { GROUP_LABELS, compactGroupCountSummary, groupCountSummary, groupSubagentRows, sortSubagentRows, type SubagentViewRow } from "./view-model.js";
 
 export type SubagentsViewAction =
   | { type: "close" }
-  | { type: "refresh" }
-  | { type: "peek"; id: string }
   | { type: "reply"; id: string }
   | { type: "stop"; id: string; confirmed?: boolean }
   | { type: "attach"; id: string }
   | { type: "result"; id: string };
 
-type Theme = { fg?: (token: string, text: string) => string; bold?: (text: string) => string };
+export interface SubagentsViewHooks {
+  requestRender(): void;
+  refreshNow(): Promise<void>;
+  finish(action: SubagentsViewAction | undefined): void;
+}
 
-type Done = (action: SubagentsViewAction | undefined) => void;
+export interface SubagentsViewOptions {
+  selectedId?: string;
+}
 
-const DONE_ROW_LIMIT = 5;
+type Theme = {
+  fg?: (token: string, text: string) => string;
+  bg?: (token: string, text: string) => string;
+  bold?: (text: string) => string;
+};
 
 function fg(theme: Theme, token: string, text: string): string {
   return theme.fg ? theme.fg(token, text) : text;
+}
+
+function bg(theme: Theme, token: string, text: string): string {
+  return theme.bg ? theme.bg(token, text) : text;
 }
 
 function bold(theme: Theme, text: string): string {
   return theme.bold ? theme.bold(text) : text;
 }
 
-function padOrTruncate(text: string, width: number): string {
-  if (width <= 0) return "";
-  const truncated = truncateToWidth(text, width);
-  return `${truncated}${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}`;
+function pad(text: string, width: number): string {
+  const value = truncateToWidth(text, Math.max(0, width));
+  return `${value}${" ".repeat(Math.max(0, width - visibleWidth(value)))}`;
 }
 
-function leftPadOrTruncate(text: string, width: number): string {
-  if (width <= 0) return "";
-  const truncated = truncateToWidth(text, width);
-  return `${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}${truncated}`;
+function lineToWidth(text: string, width: number): string {
+  return truncateToWidth(text, Math.max(1, width));
 }
 
-function lineToWidth(parts: string[], width: number): string {
-  return truncateToWidth(parts.join(""), width);
+function rowToken(row: SubagentViewRow): string | undefined {
+  if (row.group === "needsInput") return SUBAGENT_UI.theme.attention;
+  if (row.group === "error") return SUBAGENT_UI.theme.error;
+  return undefined;
 }
 
-function formatCost(value: number): string {
-  if (value === 0) return "$0";
-  if (value < 0.01) return `$${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
-  return `$${value.toFixed(2)}`;
-}
-
-function usageCost(row: SubagentViewRow): number | undefined {
-  return row.status.usage?.cost.total ?? row.status.heartbeat?.usage?.cost.total ?? row.status.latestTurn?.usage?.cost.total;
-}
-
-function totalCost(rows: SubagentViewRow[]): string | undefined {
-  let total = 0;
-  let hasCost = false;
-  for (const row of rows) {
-    const cost = usageCost(row);
-    if (cost === undefined) continue;
-    total += cost;
-    hasCost = true;
-  }
-  return hasCost ? formatCost(total) : undefined;
-}
-
-function rowActivityText(row: SubagentViewRow): string {
-  if ((row.group === "idle" || row.group === "done") && row.resultFile) return [`result ${row.resultFile}`, row.usage].filter(Boolean).join(" · ");
-  return row.activity;
-}
-
-function cleanPeekText(text: string | undefined, max = 120): string | undefined {
-  const withoutPaths = text?.replace(/(?:~|\/[^\s:;,.)\]}]+(?:\/[^\s:;,.)\]}]+)*)/g, (match) => match.split("/").filter(Boolean).at(-1) ?? match);
-  const compact = withoutPaths?.replace(/\s+/g, " ").trim();
+function cleanText(text: string | undefined, max = 240): string | undefined {
+  const withoutAnsi = text?.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const withoutControls = withoutAnsi?.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+  const withoutPaths = withoutControls?.replace(/(?:~|\/[^\s:;,.)\]}]+(?:\/[^\s:;,.)\]}]+)*)/g, (match) => basename(match));
+  const compact = withoutPaths?.replace(/[ \t]+/g, " ").trim();
   if (!compact) return undefined;
   return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
 }
 
-export class SubagentsViewComponent {
-  private selected = 0;
-  private showPeek = true;
-  private confirmStopFor: string | undefined;
+function resultText(row: SubagentViewRow): string | undefined {
+  return row.status.latestResult ?? row.status.result;
+}
 
-  constructor(private rows: SubagentViewRow[], private theme: Theme, private done: Done) {}
+function resultExcerpt(row: SubagentViewRow, width: number): { lines: string[]; omitted: boolean } {
+  const raw = resultText(row)?.replace(/\r\n?/g, "\n");
+  if (!raw) return { lines: ["No result text captured."], omitted: false };
+  const cleaned = cleanText(raw, SUBAGENT_UI.resultExcerptChars);
+  if (!cleaned) return { lines: ["No result text captured."], omitted: false };
+  const sourceOmitted = raw.length > SUBAGENT_UI.resultExcerptChars;
+  const wrapped = cleaned.split("\n").flatMap((line) => wrapTextWithAnsi(line, Math.max(8, width)));
+  const omitted = sourceOmitted || wrapped.length > SUBAGENT_UI.resultExcerptLines;
+  if (!omitted) return { lines: wrapped, omitted: false };
+  return {
+    lines: [...wrapped.slice(0, Math.max(1, SUBAGENT_UI.resultExcerptLines - 1)), "…"],
+    omitted: true,
+  };
+}
+
+function groupToken(group: SubagentViewRow["group"]): string {
+  if (group === "needsInput") return SUBAGENT_UI.theme.attention;
+  if (group === "error") return SUBAGENT_UI.theme.error;
+  return SUBAGENT_UI.theme.secondary;
+}
+
+export class SubagentsViewComponent {
+  private rows: SubagentViewRow[];
+  private selected = 0;
+  private expandedFor: { id: string; kind: "details" | "result" } | undefined;
+  private confirmStopFor: string | undefined;
+  private refreshing = false;
+  private refreshError: string | undefined;
+
+  constructor(rows: SubagentViewRow[], private theme: Theme, private hooks: SubagentsViewHooks, options: SubagentsViewOptions = {}) {
+    this.rows = sortSubagentRows(rows);
+    if (options.selectedId) {
+      const index = this.visibleRows().findIndex((row) => row.id === options.selectedId);
+      if (index >= 0) this.selected = index;
+    }
+  }
 
   invalidate() {}
+
+  updateRows(nextRows: SubagentViewRow[]) {
+    const previousRows = this.visibleRows();
+    const previous = previousRows[this.selected];
+    const previousIndex = this.selected;
+    this.rows = sortSubagentRows(nextRows);
+    const visible = this.visibleRows();
+    const sameId = previous ? visible.findIndex((row) => row.id === previous.id) : -1;
+    if (sameId >= 0) this.selected = sameId;
+    else if (previous) {
+      const sameGroup = visible.map((row, index) => ({ row, index })).filter(({ row }) => row.group === previous.group);
+      this.selected = sameGroup.length
+        ? sameGroup.reduce((best, item) => Math.abs(item.index - previousIndex) < Math.abs(best.index - previousIndex) ? item : best).index
+        : Math.min(previousIndex, Math.max(0, visible.length - 1));
+    } else this.selected = 0;
+    if (this.expandedFor && !visible.some((row) => row.id === this.expandedFor!.id)) this.expandedFor = undefined;
+    this.hooks.requestRender();
+  }
 
   handleInput(data: string) {
     const row = this.selectedRow();
     if (this.confirmStopFor) {
-      if (data.toLowerCase() === "y") this.done({ type: "stop", id: this.confirmStopFor, confirmed: true });
-      else if (data.toLowerCase() === "n" || matchesKey(data, Key.escape) || data === "\u0003") this.confirmStopFor = undefined;
+      if (data.toLowerCase() === "y") this.hooks.finish({ type: "stop", id: this.confirmStopFor, confirmed: true });
+      else if (data.toLowerCase() === "n" || matchesKey(data, Key.escape) || data === "\u0003") {
+        this.confirmStopFor = undefined;
+        this.hooks.requestRender();
+      }
       return;
     }
 
-    if (matchesKey(data, Key.up)) this.selected = Math.max(0, this.selected - 1);
-    else if (matchesKey(data, Key.down)) this.selected = Math.min(Math.max(0, this.visibleRows().length - 1), this.selected + 1);
-    else if (matchesKey(data, Key.escape) || data === "\u0003") this.done({ type: "close" });
-    else if ((data === " " || data === "p") && row?.canPeek) this.showPeek = !this.showPeek;
-    else if (data === "r" && row?.canReply) this.done({ type: "reply", id: row.id });
-    else if (data === "a" && row) this.done({ type: "attach", id: row.id });
+    if (matchesKey(data, Key.up)) {
+      this.selected = Math.max(0, this.selected - 1);
+      this.expandedFor = undefined;
+      this.hooks.requestRender();
+    } else if (matchesKey(data, Key.down)) {
+      this.selected = Math.min(Math.max(0, this.visibleRows().length - 1), this.selected + 1);
+      this.expandedFor = undefined;
+      this.hooks.requestRender();
+    } else if (matchesKey(data, Key.escape) || data === "\u0003") this.hooks.finish({ type: "close" });
+    else if (matchesKey(data, Key.enter) && row) this.primaryAction(row);
+    else if (data === "r" && row?.canReply) this.hooks.finish({ type: "reply", id: row.id });
+    else if (data === "a" && row?.canAttach) this.hooks.finish({ type: "attach", id: row.id });
+    else if (data === "o" && row?.resultFile) this.hooks.finish({ type: "result", id: row.id });
     else if (data === "s" && row?.canStop) this.stopOrConfirm(row);
-    else if (matchesKey(data, Key.enter) && row) row.resultFile ? this.done({ type: "result", id: row.id }) : this.done({ type: "attach", id: row.id });
-    else if (data === "R") this.done({ type: "refresh" });
+    else if (data === "R") void this.refresh();
   }
 
   render(width: number): string[] {
     const safeWidth = Math.max(20, width);
-    const counts = [groupCountSummary(this.rows) || "no jobs", totalCost(this.rows)].filter(Boolean).join(" · ");
-    const headerText = ` subagents view · ${counts} `;
-    const refreshText = " R refresh ";
-    const fill = "─".repeat(Math.max(1, safeWidth - visibleWidth(headerText) - visibleWidth(refreshText)));
+    const counts = groupCountSummary(this.rows) || "no jobs";
+    const totalCost = this.totalCost();
+    const headerLines = safeWidth < SUBAGENT_UI.wideViewMin
+      ? [
+          fg(this.theme, SUBAGENT_UI.theme.primary, bold(this.theme, "Subagents")),
+          fg(this.theme, SUBAGENT_UI.theme.secondary, [compactGroupCountSummary(this.rows), totalCost].filter(Boolean).join(" · ")),
+        ]
+      : [fg(this.theme, SUBAGENT_UI.theme.primary, bold(this.theme, ["Subagents", counts, totalCost].filter(Boolean).join(" · ")))];
     const lines = [
-      fg(this.theme, "borderMuted", "─".repeat(safeWidth)),
-      lineToWidth([fg(this.theme, "accent", bold(this.theme, headerText)), fg(this.theme, "borderMuted", fill), fg(this.theme, "dim", refreshText)], safeWidth),
+      ...headerLines,
+      fg(this.theme, SUBAGENT_UI.theme.divider, "─".repeat(safeWidth)),
       "",
     ];
 
     if (!this.rows.length) {
-      lines.push(fg(this.theme, "muted", "No tmux subagent jobs."));
-      lines.push("");
-      lines.push(fg(this.theme, "dim", "↑↓ select • enter result/attach • R refresh • esc close"));
-      return lines.map((line) => truncateToWidth(line, safeWidth));
+      lines.push(fg(this.theme, SUBAGENT_UI.theme.secondary, "No tmux subagent jobs."));
+      lines.push("", fg(this.theme, SUBAGENT_UI.theme.tertiary, "esc close"));
+      return lines.map((line) => lineToWidth(line, safeWidth));
     }
 
     const visibleRows = this.visibleRows();
@@ -126,35 +178,18 @@ export class SubagentsViewComponent {
     const hiddenDone = this.rows.filter((row) => row.group === "done").length - visibleRows.filter((row) => row.group === "done").length;
     let absoluteIndex = 0;
     for (const [group, groupRows] of grouped) {
-      lines.push(fg(this.theme, "muted", `${GROUP_LABELS[group]} (${groupRows.length})`));
+      lines.push(fg(this.theme, groupToken(group), `${GROUP_LABELS[group]}  ${groupRows.length}`));
       for (const row of groupRows) {
-        const selected = absoluteIndex === this.selected;
-        const marker = selected ? ">" : " ";
-        const glyphToken = row.group === "needsInput" ? "warning" : row.group === "running" ? "accent" : row.group === "error" ? "error" : row.group === "idle" ? "success" : "muted";
-        const nameWidth = Math.min(22, Math.max(12, Math.floor(safeWidth * 0.22)));
-        const ageWidth = Math.min(8, Math.max(3, row.age.length));
-        const fixed = 2 + 2 + nameWidth + 2 + ageWidth;
-        const activityWidth = Math.max(10, safeWidth - fixed);
-        const text = [
-          marker,
-          " ",
-          fg(this.theme, glyphToken, row.glyph),
-          " ",
-          padOrTruncate(row.name, nameWidth),
-          "  ",
-          padOrTruncate(rowActivityText(row), activityWidth),
-          leftPadOrTruncate(row.age, ageWidth),
-        ].join("");
-        lines.push(selected ? fg(this.theme, "accent", text) : text);
+        lines.push(this.renderRow(row, absoluteIndex === this.selected, safeWidth));
         absoluteIndex += 1;
       }
-      if (group === "done" && hiddenDone > 0) lines.push(fg(this.theme, "dim", `  +${hiddenDone} more done`));
+      if (group === "done" && hiddenDone > 0) lines.push(fg(this.theme, SUBAGENT_UI.theme.tertiary, `  +${hiddenDone} more done`));
       lines.push("");
     }
 
-    if (this.showPeek) lines.push(...this.renderPeek(safeWidth));
-    lines.push(this.renderFooter());
-    return lines.map((line) => truncateToWidth(line, safeWidth));
+    lines.push(...this.renderSelectedDetail(safeWidth));
+    lines.push(...this.renderFooter(safeWidth));
+    return lines.map((line) => lineToWidth(line, safeWidth));
   }
 
   private visibleRows(): SubagentViewRow[] {
@@ -162,7 +197,7 @@ export class SubagentsViewComponent {
     return sortSubagentRows(this.rows).filter((row) => {
       if (row.group !== "done") return true;
       doneCount += 1;
-      return doneCount <= DONE_ROW_LIMIT;
+      return doneCount <= SUBAGENT_UI.doneRowLimit;
     });
   }
 
@@ -170,43 +205,122 @@ export class SubagentsViewComponent {
     return this.visibleRows()[this.selected];
   }
 
+  private primaryAction(row: SubagentViewRow) {
+    if (row.primaryAction === "reply") {
+      this.hooks.finish({ type: "reply", id: row.id });
+      return;
+    }
+    const kind = row.primaryAction === "result" ? "result" : "details";
+    this.expandedFor = this.expandedFor?.id === row.id && this.expandedFor.kind === kind ? undefined : { id: row.id, kind };
+    this.hooks.requestRender();
+  }
+
   private stopOrConfirm(row: SubagentViewRow) {
     if (row.group === "running" || row.group === "needsInput") {
       this.confirmStopFor = row.id;
+      this.hooks.requestRender();
       return;
     }
-    this.done({ type: "stop", id: row.id });
+    this.hooks.finish({ type: "stop", id: row.id });
   }
 
-  private renderFooter(): string {
-    const row = this.selectedRow();
-    if (this.confirmStopFor && row) {
-      return fg(this.theme, "warning", `${row.name} is ${row.stateLabel}. Stop it and nested children? y confirm · n cancel`);
+  private async refresh() {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    this.refreshError = undefined;
+    this.hooks.requestRender();
+    try {
+      await this.hooks.refreshNow();
+    } catch (error) {
+      this.refreshError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.refreshing = false;
+      this.hooks.requestRender();
     }
-    const reply = row?.canReply ? "r reply" : fg(this.theme, "dim", "r reply");
-    const stop = row?.canStop ? "s stop" : fg(this.theme, "dim", "s stop");
-    return fg(this.theme, "dim", `↑↓ select • p peek • ${reply} • ${stop} • a attach • enter result/attach • R refresh • esc close`);
   }
 
-  private renderPeek(width: number): string[] {
+  private renderRow(row: SubagentViewRow, selected: boolean, width: number): string {
+    const marker = selected ? ">" : " ";
+    const glyph = row.group === "done" ? "·" : row.glyph;
+    const token = rowToken(row);
+    const styledGlyph = token ? fg(this.theme, token, glyph) : glyph;
+    const ageWidth = Math.max(2, row.age.length);
+    let line: string;
+    if (width >= SUBAGENT_UI.wideViewMin) {
+      const nameWidth = Math.min(SUBAGENT_UI.nameMax, Math.max(SUBAGENT_UI.nameMin, Math.floor(width * 0.22)));
+      const fixed = 4 + nameWidth + 2 + ageWidth;
+      const activityWidth = Math.max(8, width - fixed);
+      const activity = pad(row.activity, activityWidth);
+      const styledActivity = token ? fg(this.theme, token, activity) : activity;
+      line = `${marker} ${styledGlyph} ${pad(row.name, nameWidth)}  ${styledActivity}${pad(row.age, ageWidth)}`;
+    } else {
+      const nameWidth = Math.max(4, width - 4 - ageWidth);
+      line = `${marker} ${styledGlyph} ${pad(row.name, nameWidth)}${pad(row.age, ageWidth)}`;
+    }
+    const fitted = pad(lineToWidth(line, width), width);
+    return selected ? bg(this.theme, SUBAGENT_UI.theme.selectionBg, fitted) : fitted;
+  }
+
+  private renderSelectedDetail(width: number): string[] {
     const row = this.selectedRow();
     if (!row) return [];
-    const task = cleanPeekText(row.status.job.taskPreview);
-    const question = cleanPeekText(row.status.heartbeat?.attention?.message);
-    const error = cleanPeekText(row.status.job.error);
-    const lead = question && row.group === "needsInput" ? `  question: ${question}` : error && row.group === "error" ? `  error: ${error}` : row.activity !== task && row.activity !== "—" ? `  status: ${cleanPeekText(row.activity)}` : undefined;
+    const header = [row.name, row.stateLabel, row.age, row.usage].filter(Boolean).join(" · ");
     const lines = [
-      fg(this.theme, "borderMuted", "─".repeat(width)),
-      `${fg(this.theme, "accent", "Peek:")} ${row.name} (${row.agentName}) · ${row.stateLabel} · ${row.age}${row.usage ? ` · ${row.usage}` : ""}`,
-      lead,
-      task ? `  task: ${task}` : undefined,
-      row.parentId ? `  parent: ${row.parentId.slice(0, 12)}` : undefined,
-      `  result: ${row.resultFile ?? "—"}`,
-    ].filter((line): line is string => Boolean(line));
-    return lines.map((line) => truncateToWidth(line, width));
+      fg(this.theme, SUBAGENT_UI.theme.divider, "─".repeat(width)),
+      fg(this.theme, SUBAGENT_UI.theme.primary, bold(this.theme, header)),
+      rowToken(row) ? fg(this.theme, rowToken(row)!, row.detail) : row.detail,
+    ];
+    const expanded = this.expandedFor?.id === row.id ? this.expandedFor.kind : undefined;
+    if (expanded === "result") {
+      const excerpt = resultExcerpt(row, Math.max(8, width - 2));
+      lines.push(fg(this.theme, SUBAGENT_UI.theme.secondary, `result  ${row.resultFile ?? "result"}${excerpt.omitted ? " · excerpt" : ""}`));
+      lines.push(...excerpt.lines.map((line) => `  ${line}`));
+    } else if (expanded === "details") {
+      const task = cleanText(row.status.job.taskPreview);
+      if (task) lines.push(`task  ${task}`);
+      if (row.resultFile) lines.push(`result  ${row.resultFile}`);
+      if (row.parentId) lines.push(`parent  ${row.parentId.slice(0, 12)}`);
+    }
+    lines.push("");
+    return lines;
+  }
+
+  private renderFooter(width: number): string[] {
+    const row = this.selectedRow();
+    if (this.confirmStopFor && row) {
+      const prompt = `${row.name} is ${row.stateLabel}. Stop it and nested children?`;
+      const lines = width < 40 ? [prompt, "y confirm · n cancel"] : [`${prompt} y confirm · n cancel`];
+      return lines.map((line) => fg(this.theme, SUBAGENT_UI.theme.attention, line));
+    }
+    if (!row) return [fg(this.theme, SUBAGENT_UI.theme.tertiary, "esc close")];
+    const expanded = this.expandedFor?.id === row.id ? this.expandedFor.kind : undefined;
+    const primary = row.primaryAction === "reply"
+      ? "enter reply"
+      : row.primaryAction === "result"
+        ? `enter ${expanded === "result" ? "hide" : "show"} result`
+        : `enter ${expanded === "details" ? "hide" : "show"} details`;
+    const stop = row.canStop ? "s stop" : undefined;
+    const error = this.refreshError ? `refresh failed: ${cleanText(this.refreshError, 60)}` : undefined;
+    const parts = width >= SUBAGENT_UI.wideViewMin
+      ? [error, primary, row.resultFile ? "o result path" : undefined, stop, row.canAttach ? "a attach" : undefined, this.refreshing ? "refreshing" : "R refresh", "esc close"]
+      : [error, primary, stop, "esc close"];
+    if (width >= 40) return [fg(this.theme, SUBAGENT_UI.theme.tertiary, parts.filter(Boolean).join(" · "))];
+    return [
+      ...[error, primary].filter((part): part is string => Boolean(part)),
+      [stop, "esc close"].filter(Boolean).join(" · "),
+    ].map((line) => fg(this.theme, SUBAGENT_UI.theme.tertiary, line));
+  }
+
+  private totalCost(): string | undefined {
+    const costs = this.rows.map((row) => row.cost).filter((cost): cost is number => cost !== undefined);
+    if (!costs.length) return undefined;
+    const total = costs.reduce((sum, cost) => sum + cost, 0);
+    if (total === 0) return "$0";
+    if (total < 0.01) return `$${total.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+    return `$${total.toFixed(2)}`;
   }
 }
 
-export function createSubagentsView(rows: SubagentViewRow[], theme: Theme, done: Done): SubagentsViewComponent {
-  return new SubagentsViewComponent(sortSubagentRows(rows), theme, done);
+export function createSubagentsView(rows: SubagentViewRow[], theme: Theme, hooks: SubagentsViewHooks, options: SubagentsViewOptions = {}): SubagentsViewComponent {
+  return new SubagentsViewComponent(rows, theme, hooks, options);
 }

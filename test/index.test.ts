@@ -20,13 +20,21 @@ function createTmuxSession(name: string) {
   execFileSync("tmux", ["new-session", "-d", "-s", name, "sleep 100"], { stdio: "ignore" });
 }
 
-async function waitForWidget(widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]>, matcher: (content: string[] | undefined) => boolean) {
+type WidgetContent = string[] | ((tui: { requestRender(): void }, theme: any) => { render(width: number): string[] }) | undefined;
+type WidgetCall = [string, WidgetContent, { placement?: string } | undefined];
+
+function renderWidget(content: WidgetContent, width = 120, requestRender: () => void = () => {}): string[] | undefined {
+  if (!content || Array.isArray(content)) return content;
+  return content({ requestRender }, { fg: (_token: string, text: string) => text, bg: (_token: string, text: string) => text, bold: (text: string) => text }).render(width);
+}
+
+async function waitForWidget(widgets: WidgetCall[], matcher: (content: string[] | undefined) => boolean) {
   for (let index = 0; index < 10; index += 1) {
-    const latest = widgets.at(-1)?.[1];
+    const latest = renderWidget(widgets.at(-1)?.[1]);
     if (matcher(latest)) return latest;
     await waitImmediate();
   }
-  return widgets.at(-1)?.[1];
+  return renderWidget(widgets.at(-1)?.[1]);
 }
 
 async function handlersShutdown(handlers: Map<string, Function>) {
@@ -76,7 +84,7 @@ test("tmux_subagent uses canonical parent status and widget keys", async () => {
   try {
     const handlers = new Map<string, Function>();
     const statuses: Array<[string, string | undefined]> = [];
-    const widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]> = [];
+    const widgets: WidgetCall[] = [];
     extension({
       registerTool() {},
       on(name: string, handler: Function) { handlers.set(name, handler); },
@@ -93,7 +101,7 @@ test("tmux_subagent uses canonical parent status and widget keys", async () => {
           },
         },
         setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
-        setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]),
+        setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]),
       },
     });
 
@@ -121,7 +129,7 @@ test("tmux_subagent retains auto-stopped completions briefly and then clears", a
 
   const restorePiEnv = isolatePiStateEnv(agentDir);
   const handlers = new Map<string, Function>();
-  const widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]> = [];
+  const widgets: WidgetCall[] = [];
   let tool: any;
   createTmuxSession(tmuxSession);
   try {
@@ -129,11 +137,11 @@ test("tmux_subagent retains auto-stopped completions briefly and then clears", a
       registerTool(def: any) { tool = def; },
       on(name: string, handler: Function) { handlers.set(name, handler); },
     } as any);
-    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]) } });
+    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]) } });
 
     await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
 
-    assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /scout-retained · done/);
+    assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-retained/);
     t.mock.timers.tick(10_001);
     assert.equal(widgets.at(-1)?.[1], undefined);
   } finally {
@@ -163,7 +171,7 @@ test("tmux_subagent summary widget expires stale summaries while idle", async (t
   const restorePiEnv = isolatePiStateEnv(agentDir);
   process.env.PI_AGENT_HUB_DIR = hub;
   const handlers = new Map<string, Function>();
-  const widgets: Array<[string, string[] | undefined, { placement?: string } | undefined]> = [];
+  const widgets: WidgetCall[] = [];
   let tool: any;
   createTmuxSession(tmuxSession);
   try {
@@ -171,15 +179,22 @@ test("tmux_subagent summary widget expires stale summaries while idle", async (t
       registerTool(def: any) { tool = def; },
       on(name: string, handler: Function) { handlers.set(name, handler); },
     } as any);
-    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: string[] | undefined, options?: { placement?: string }) => widgets.push([key, content, options]) } });
+    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]) } });
 
     await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
-    const fresh = await waitForWidget(widgets, (content) => /status: Fresh summary detail/.test(content?.join("\n") ?? ""));
-    assert.match(fresh?.join("\n") ?? "", /status: Fresh summary detail/);
+    const fresh = await waitForWidget(widgets, (content) => /Fresh summary detail/.test(content?.join("\n") ?? ""));
+    assert.match(fresh?.join("\n") ?? "", /Fresh summary detail/);
+    let ageRenders = 0;
+    renderWidget(widgets.at(-1)?.[1], 120, () => { ageRenders += 1; });
 
     t.mock.timers.tick(60_002);
-    assert.doesNotMatch(widgets.at(-1)?.[1]?.join("\n") ?? "", /Fresh summary detail/);
-    assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /task: Keep summary fallback/);
+    assert.ok(ageRenders > 0);
+    assert.doesNotMatch(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /Fresh summary detail/);
+    assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /Keep summary fallback/);
+    await handlersShutdown(handlers);
+    const rendersAfterShutdown = ageRenders;
+    t.mock.timers.tick(60_000);
+    assert.equal(ageRenders, rendersAfterShutdown);
   } finally {
     await handlersShutdown(handlers);
     killTmuxSession(tmuxSession);
@@ -263,7 +278,7 @@ test("tmux_subagent exposes stop as a shutdown alias", () => {
   assert.ok(tool.parameters.properties.action.enum.includes("stop"));
 });
 
-test("tmux_subagent registers subagent widget command and shortcut", () => {
+test("tmux_subagent registers subagent manager command and shortcuts", () => {
   let command: any;
   const shortcuts: any[] = [];
   extension({
@@ -274,35 +289,26 @@ test("tmux_subagent registers subagent widget command and shortcut", () => {
   } as any);
 
   assert.equal(command.name, "subagents");
-  assert.match(command.description, /details widget/);
-  assert.match(command.description, /peek mode/);
+  assert.match(command.description, /manager/);
+  assert.doesNotMatch(command.description, /details\s+widget|peek\s+mode/);
   assert.deepEqual(shortcuts.map((shortcut) => shortcut.key), ["alt+s", "ctrl+alt+s"]);
-  assert.match(shortcuts[0].description, /details widget/);
+  assert.match(shortcuts[0].description, /Open.*manager/i);
 });
 
-test("subagents command supports peek and toggles peek back to summary", async () => {
+test("subagents command rejects removed widget mode verbs", async () => {
   let command: any;
-  const shortcuts: any[] = [];
   const notifications: string[] = [];
   extension({
     registerTool() {},
     on() {},
     registerCommand(name: string, def: any) { command = { name, ...def }; },
-    registerShortcut(key: string, def: any) { shortcuts.push({ key, ...def }); },
   } as any);
-  const ctx = { ui: { notify: (message: string) => notifications.push(message) } };
+  const ctx = { cwd: process.cwd(), ui: { notify: (message: string) => notifications.push(message) } };
 
-  await command.handler("peek", ctx);
-  await shortcuts[0].handler(ctx);
-  await command.handler("show", ctx);
-  await command.handler("hide", ctx);
+  for (const verb of ["peek", "details", "show", "hide", "on", "off"]) await command.handler(verb, ctx);
 
-  assert.deepEqual(notifications, [
-    "Subagent peek shown.",
-    "Subagent details hidden.",
-    "Subagent details shown.",
-    "Subagent details hidden.",
-  ]);
+  assert.equal(notifications.length, 6);
+  assert.ok(notifications.every((message) => /Unknown subagents command/.test(message)));
 });
 
 test("subagents command parser preserves reply message casing", () => {
@@ -310,23 +316,225 @@ test("subagents command parser preserves reply message casing", () => {
   assert.deepEqual(parseSubagentsCommand("VIEW"), { verb: "view" });
 });
 
-test("subagents command opens view and library custom UIs", async () => {
+test("subagents command and shortcuts open the manager while library stays separate", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-command-ui-test-"));
   const restorePiEnv = isolatePiStateEnv(join(root, "agent"));
   try {
     let command: any;
+    const shortcuts: any[] = [];
     const customCalls: unknown[] = [];
     extension({
       registerTool() {},
       on() {},
       registerCommand(name: string, def: any) { if (name === "subagents") command = def; },
+      registerShortcut(key: string, def: any) { shortcuts.push({ key, ...def }); },
     } as any);
+    const ctx = { cwd: root, ui: { custom: async (factory: Function) => { customCalls.push(factory({ requestRender() {} }, {}, {}, () => undefined)); } } };
 
-    await command.handler("view", { cwd: root, ui: { custom: async (factory: Function) => { customCalls.push(factory({}, {}, {}, () => undefined)); } } });
-    await command.handler("library", { cwd: root, ui: { custom: async (factory: Function) => { customCalls.push(factory({}, {}, {}, () => undefined)); } } });
+    await command.handler("", ctx);
+    await command.handler("view", ctx);
+    await command.handler("library", ctx);
+    await shortcuts[0].handler(ctx);
+    await shortcuts[1].handler(ctx);
 
-    assert.equal(customCalls.length, 2);
+    assert.equal(customCalls.length, 5);
   } finally {
+    restorePiEnv();
+  }
+});
+
+test("subagents manager hides the ambient widget until the manager closes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-manager-widget-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "visible-child";
+  const tmuxSession = `pi-tmux-manager-widget-${process.pid}`;
+  mkdirSync(join(state, "jobs", id), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "scout", displayName: "scout-visible", taskPreview: "Stay visible", cwd: root, tmuxSession, status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: Date.now() - 1_000, updatedAt: Date.now(), autoStopOnComplete: false }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "heartbeat.json"), `${JSON.stringify({ jobId: id, cwd: root, state: "running", stateSince: Date.now() - 1_000, updatedAt: Date.now(), seenRunning: true }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  const handlers = new Map<string, Function>();
+  const widgets: WidgetCall[] = [];
+  createTmuxSession(tmuxSession);
+  try {
+    let command: any;
+    let tool: any;
+    extension({
+      registerTool(def: any) { tool = def; },
+      on(name: string, handler: Function) { handlers.set(name, handler); },
+      registerCommand(name: string, def: any) { if (name === "subagents") command = def; },
+    } as any);
+    const ui = {
+      setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]),
+      custom: async (factory: Function) => {
+        assert.equal(widgets.at(-1)?.[1], undefined);
+        const component = factory({ requestRender() {} }, {}, {}, () => undefined);
+        assert.match(component.render(100).join("\n"), /scout-visible/);
+        return { type: "close" };
+      },
+      notify() {},
+    };
+    await handlers.get("session_start")?.({}, { cwd: root, ui });
+    await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
+    assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-visible/);
+
+    await command.handler("view", { cwd: root, ui });
+
+    assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-visible/);
+  } finally {
+    await handlersShutdown(handlers);
+    killTmuxSession(tmuxSession);
+    restorePiEnv();
+  }
+});
+
+test("subagents manager reopens after dialog actions but attach exits to the editor", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-manager-action-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "idle-child";
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "scout", displayName: "scout-idle", taskPreview: "Wait for follow-up", cwd: root, tmuxSession: "missing-idle-child", status: "waiting", resultPath: join(state, "jobs", id, "result.md"), createdAt: 1, updatedAt: 2, autoStopOnComplete: false }],
+  }, null, 2)}\n`);
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let command: any;
+    extension({ registerTool() {}, on() {}, registerCommand(name: string, def: any) { if (name === "subagents") command = def; } } as any);
+
+    const replyActions = [{ type: "reply", id }, { type: "close" }];
+    let replyViews = 0;
+    const replyNotices: string[] = [];
+    await command.handler("view", { cwd: root, ui: {
+      custom: async () => { replyViews += 1; return replyActions.shift(); },
+      input: async () => undefined,
+      notify: (message: string) => replyNotices.push(message),
+    } });
+    assert.equal(replyViews, 2);
+    assert.deepEqual(replyNotices, []);
+
+    const resultActions = [{ type: "result", id }, { type: "close" }];
+    let resultViews = 0;
+    const resultNotices: string[] = [];
+    await command.handler("view", { cwd: root, ui: {
+      custom: async () => { resultViews += 1; return resultActions.shift(); },
+      notify: (message: string) => resultNotices.push(message),
+    } });
+    assert.equal(resultViews, 2);
+    assert.match(resultNotices[0] ?? "", /Result:/);
+
+    let attachViews = 0;
+    let editorText = "";
+    await command.handler("view", { cwd: root, ui: {
+      custom: async () => { attachViews += 1; return { type: "attach", id }; },
+      setEditorText: (text: string) => { editorText = text; },
+      notify() {},
+    } });
+    assert.equal(attachViews, 1);
+    assert.match(editorText, /^!tmux attach-session/);
+  } finally {
+    restorePiEnv();
+  }
+});
+
+test("open manager refreshes live metadata in place and disposes its timer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-manager-live-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const hub = join(root, "hub");
+  const id = "live-child";
+  const tmuxSession = `pi-tmux-manager-live-${process.pid}`;
+  mkdirSync(state, { recursive: true });
+  mkdirSync(join(hub, "session-metadata"), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({ version: 1, jobs: [] }, null, 2)}\n`);
+  const metadataPath = join(hub, "session-metadata", `${id}.json`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  process.env.PI_AGENT_HUB_DIR = hub;
+  try {
+    let command: any;
+    let component: any;
+    let renders = 0;
+    const handlers = new Map<string, Function>();
+    extension({ registerTool() {}, on(name: string, handler: Function) { handlers.set(name, handler); }, registerCommand(name: string, def: any) { if (name === "subagents") command = def; } } as any);
+    const commandPromise = command.handler("view", { cwd: root, ui: {
+      custom: async (factory: Function) => new Promise((resolve) => {
+        component = factory({ requestRender: () => { renders += 1; } }, {}, {}, resolve);
+      }),
+      notify() {},
+    } });
+    for (let index = 0; index < 100 && !component; index += 1) await waitImmediate();
+    assert.ok(component, "manager component did not mount");
+    assert.match(component.render(100).join("\n"), /No tmux subagent jobs/);
+
+    mkdirSync(join(state, "jobs", id), { recursive: true });
+    writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+      version: 1,
+      jobs: [{ id, agentName: "scout", displayName: "scout-live", taskPreview: "Fallback task", cwd: root, tmuxSession, status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: Date.now() - 10_000, updatedAt: Date.now() - 1_000, autoStopOnComplete: false }],
+    }, null, 2)}\n`);
+    writeFileSync(join(state, "jobs", id, "heartbeat.json"), `${JSON.stringify({ jobId: id, cwd: root, state: "running", stateSince: Date.now() - 10_000, updatedAt: Date.now() - 1_000, seenRunning: true }, null, 2)}\n`);
+    writeFileSync(metadataPath, `${JSON.stringify({ source: "pi-session-summary", status: "Manual status", stage: "testing", updatedAt: Date.now() }, null, 2)}\n`);
+    createTmuxSession(tmuxSession);
+    component.handleInput("R");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.match(component.render(100).join("\n"), /testing · Manual status/);
+
+    writeFileSync(metadataPath, `${JSON.stringify({ source: "pi-session-summary", status: "Updated status", stage: "reviewing", updatedAt: Date.now() }, null, 2)}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 3_100));
+    for (let index = 0; index < 20; index += 1) await waitImmediate();
+    assert.match(component.render(100).join("\n"), /reviewing · Updated status/);
+
+    await handlersShutdown(handlers);
+    const rendersBeforeClose = renders;
+    component.handleInput("\u001b");
+    await commandPromise;
+    await new Promise((resolve) => setTimeout(resolve, 3_100));
+    assert.equal(renders, rendersBeforeClose);
+  } finally {
+    killTmuxSession(tmuxSession);
+    restorePiEnv();
+  }
+});
+
+test("manager observation applies auto-stop before rendering completion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-manager-autostop-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "completed-child";
+  const tmuxSession = `pi-tmux-manager-autostop-${process.pid}`;
+  mkdirSync(join(state, "jobs", id), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "scout", displayName: "scout-complete", taskPreview: "Finish", cwd: root, tmuxSession, status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: 1, updatedAt: 2, autoStopOnComplete: true }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "heartbeat.json"), `${JSON.stringify({ jobId: id, cwd: root, state: "waiting", stateSince: 2, updatedAt: 3, seenRunning: true }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "result.md"), "Completed result\n");
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  createTmuxSession(tmuxSession);
+  try {
+    let command: any;
+    let rendered = "";
+    extension({ registerTool() {}, on() {}, registerCommand(name: string, def: any) { if (name === "subagents") command = def; } } as any);
+    await command.handler("view", { cwd: root, ui: {
+      custom: async (factory: Function) => {
+        const component = factory({ requestRender() {} }, {}, {}, () => undefined);
+        rendered = component.render(100).join("\n");
+        return { type: "close" };
+      },
+      notify() {},
+    } });
+
+    assert.match(rendered, /Done  1/);
+    assert.match(rendered, /scout-complete/);
+    assert.doesNotMatch(rendered, /s stop|a attach/);
+    assert.throws(() => execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" }));
+  } finally {
+    killTmuxSession(tmuxSession);
     restorePiEnv();
   }
 });

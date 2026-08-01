@@ -1,5 +1,4 @@
 import { basename } from "node:path";
-import { isFreshSessionSummary, type SessionSummaryMetadata } from "./session-summary.js";
 import type { SubagentStatusResult, TmuxSubagentStatus, TmuxSubagentUsage } from "./types.js";
 
 const STATUS_PRESENTATION: Record<TmuxSubagentStatus, { glyph: string; label: string; title: string }> = {
@@ -50,18 +49,6 @@ function formatCardUsage(status: SubagentStatusResult): string | undefined {
 function lastActivity(status: SubagentStatusResult): string | undefined {
   if (!status.heartbeat || status.status !== "running" && status.status !== "starting") return undefined;
   return `${formatDuration(Date.now() - status.heartbeat.updatedAt)} ago`;
-}
-
-const QUIET_ACTIVITY_MS = 5 * 60_000;
-
-function formatActivityLabel(status: SubagentStatusResult, now = Date.now()): string | undefined {
-  if (!status.heartbeat || status.status !== "running" && status.status !== "starting") return undefined;
-  const age = Math.max(0, now - status.heartbeat.updatedAt);
-  if (age < 1000) return "active now";
-  if (age < 60_000) return `active ${Math.floor(age / 1000)}s ago`;
-  const minutes = Math.floor(age / 60_000);
-  if (age < QUIET_ACTIVITY_MS) return `active ${minutes}m ago`;
-  return `no activity for ${minutes}m`;
 }
 
 function compactName(status: SubagentStatusResult): string {
@@ -116,16 +103,6 @@ function resultBasename(status: SubagentStatusResult): string {
   return basename(resultFilePath(status));
 }
 
-function truncateLine(text: string | undefined, max = 100): string | undefined {
-  const compact = text?.replace(/\s+/g, " ").trim();
-  if (!compact) return undefined;
-  return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
-}
-
-function sanitizeWidgetDetail(text: string | undefined): string | undefined {
-  return truncateLine(text?.replace(/(?:~|\/[^\s:;,.)\]}]+(?:\/[^\s:;,.)\]}]+)*)/g, (match) => basename(match)), 100);
-}
-
 function hasResult(status: SubagentStatusResult): boolean {
   return Boolean(status.latestTurn || status.latestResult || status.result);
 }
@@ -172,132 +149,6 @@ function formatSubagentWidgetRows(statuses: SubagentStatusResult[]): string[] {
 export function formatSubagentWidget(statuses: SubagentStatusResult[]): string[] | undefined {
   if (!statuses.length) return undefined;
   return ["tmux subagents", ...formatSubagentWidgetRows(statuses)];
-}
-
-type SubagentWidgetFormatOptions = {
-  summaries?: Map<string, SessionSummaryMetadata>;
-  now?: number;
-  maxRows?: number;
-};
-
-function statusRank(status: SubagentStatusResult): number {
-  if (status.heartbeat?.attention && status.status !== "stopped" && status.status !== "error") return 0;
-  if (status.status === "error") return 1;
-  if (status.status === "starting" || status.status === "running") return 2;
-  if (status.autoStopped) return 3;
-  if (status.status === "waiting" && status.job.autoStopOnComplete === false) return 4;
-  return 5;
-}
-
-function sortedWidgetStatuses(statuses: SubagentStatusResult[]): SubagentStatusResult[] {
-  return [...statuses].sort((left, right) => statusRank(left) - statusRank(right) || (right.heartbeat?.updatedAt ?? right.job.updatedAt) - (left.heartbeat?.updatedAt ?? left.job.updatedAt));
-}
-
-function freshMetadataFor(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): SessionSummaryMetadata | undefined {
-  const metadata = summaries.get(status.job.id);
-  return metadata && isFreshSessionSummary(metadata, now) ? metadata : undefined;
-}
-
-function stageLabel(metadata: SessionSummaryMetadata | undefined): string | undefined {
-  if (!metadata?.stage || metadata.stage === "unknown") return undefined;
-  return metadata.stage;
-}
-
-function widgetPrimaryDetail(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): string | undefined {
-  const question = sanitizeWidgetDetail(status.heartbeat?.attention?.message);
-  if (question && status.status !== "stopped" && status.status !== "error") return `question: ${question}`;
-  const error = sanitizeWidgetDetail(status.job.error);
-  if (status.status === "error" && error) return `error: ${error}`;
-  const metadata = freshMetadataFor(status, summaries, now);
-  const semanticStatus = sanitizeWidgetDetail(metadata?.status);
-  if (semanticStatus) return `status: ${semanticStatus}`;
-  const goal = sanitizeWidgetDetail(metadata?.goal);
-  if (goal) return `goal: ${goal}`;
-  const task = sanitizeWidgetDetail(status.job.taskPreview);
-  if (task) return `task: ${task}`;
-  if ((status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status)) return `result: ${resultBasename(status)}`;
-  return undefined;
-}
-
-function formatSummaryRow(status: SubagentStatusResult, now: number, metadata?: SessionSummaryMetadata): string {
-  const presentation = presentationFor(status);
-  const activity = formatActivityLabel(status, now);
-  const usage = formatCardUsage(status);
-  const stage = status.status === "running" || status.status === "starting" ? stageLabel(metadata) : undefined;
-  const terminalResult = (status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status) ? `result ${resultBasename(status)}` : undefined;
-  return [`${presentation.glyph} ${compactName(status)}`, presentation.label, stage, activity, terminalResult, usage].filter(Boolean).join(" · ");
-}
-
-export function formatSubagentSummaryWidget(statuses: SubagentStatusResult[], options: SubagentWidgetFormatOptions = {}): string[] | undefined {
-  if (!statuses.length) return undefined;
-  const now = options.now ?? Date.now();
-  const summaries = options.summaries ?? new Map<string, SessionSummaryMetadata>();
-  const ordered = sortedWidgetStatuses(statuses);
-  if (ordered.length === 1) {
-    const status = ordered[0]!;
-    const freshMetadata = freshMetadataFor(status, summaries, now);
-    const question = sanitizeWidgetDetail(status.heartbeat?.attention?.message);
-    const error = sanitizeWidgetDetail(status.job.error);
-    const goal = sanitizeWidgetDetail(freshMetadata?.goal);
-    const semanticStatus = sanitizeWidgetDetail(freshMetadata?.status);
-    const nextStep = sanitizeWidgetDetail(freshMetadata?.nextStep);
-    const task = goal ? undefined : sanitizeWidgetDetail(status.job.taskPreview);
-    const detailLines = question && status.status !== "stopped" && status.status !== "error"
-      ? [`  ⎿ question: ${question}`]
-      : status.status === "error" && error
-        ? [`  ⎿ error: ${error}`]
-        : [
-            goal ? `  ⎿ goal: ${goal}` : task ? `  ⎿ task: ${task}` : undefined,
-            semanticStatus ? `  ⎿ status: ${semanticStatus}` : undefined,
-            nextStep ? `  ⎿ next: ${nextStep}` : undefined,
-          ];
-    return [
-      "tmux subagent · background",
-      formatSummaryRow(status, now, freshMetadata),
-      ...detailLines,
-      "╰─ /subagents view · /subagents details · /subagents peek",
-    ].filter((line): line is string => Boolean(line));
-  }
-
-  const maxRows = options.maxRows ?? 3;
-  const urgent = ordered.filter((status) => statusRank(status) <= 1);
-  const visible = [...urgent, ...ordered.filter((status) => !urgent.includes(status)).slice(0, Math.max(0, maxRows - urgent.length))];
-  const lines = [formatSubagentFooterStatus(statuses)?.replace(/^subagents:/, "tmux subagents ·") ?? "tmux subagents"];
-  visible.forEach((status, index) => {
-    const last = index === visible.length - 1;
-    const branch = last ? "└─" : "├─";
-    const detailPrefix = last ? "   ⎿" : "│  ⎿";
-    lines.push(`${branch} ${formatSummaryRow(status, now, freshMetadataFor(status, summaries, now))}`);
-    const detail = widgetPrimaryDetail(status, summaries, now);
-    if (detail) lines.push(`${detailPrefix} ${detail}`);
-  });
-  const hidden = ordered.length - visible.length;
-  if (hidden > 0) lines.push(`+${hidden} more · /subagents for details`);
-  lines.push("╰─ /subagents view · /subagents details · /subagents peek");
-  return lines;
-}
-
-export function formatSubagentPeekWidget(statuses: SubagentStatusResult[], summaries = new Map<string, SessionSummaryMetadata>()): string[] | undefined {
-  if (!statuses.length) return undefined;
-  const rows = formatSubagentWidgetRows(statuses);
-  return [
-    "tmux subagents · peek",
-    ...statuses.flatMap((status, index) => {
-      const task = sanitizeWidgetDetail(status.job.taskPreview);
-      const metadata = summaries.get(status.job.id);
-      const freshMetadata = metadata && isFreshSessionSummary(metadata) ? metadata : undefined;
-      const goal = sanitizeWidgetDetail(freshMetadata?.goal);
-      const semanticStatus = sanitizeWidgetDetail(freshMetadata?.status);
-      const nextStep = sanitizeWidgetDetail(freshMetadata?.nextStep);
-      return [
-        rows[index],
-        goal ? `   goal: ${goal}` : task ? `   task: ${task}` : undefined,
-        semanticStatus ? `   status: ${semanticStatus}` : undefined,
-        nextStep ? `   next: ${nextStep}` : undefined,
-        (status.status === "waiting" || status.status === "stopped" || status.status === "error") && hasResult(status) ? `   result: ${resultBasename(status)}` : undefined,
-      ].filter((line): line is string => Boolean(line));
-    }),
-  ];
 }
 
 export function formatUserStatusList(statuses: SubagentStatusResult[], hiddenStopped = 0): string {

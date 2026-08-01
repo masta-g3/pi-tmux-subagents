@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupCountSummary, sortSubagentRows, toSubagentViewRows } from "../src/view-model.js";
+import { compactGroupCountSummary, groupCountSummary, sortSubagentRows, toSubagentViewRows } from "../src/view-model.js";
 import type { SubagentStatusResult } from "../src/types.js";
 
 function status(overrides: Partial<SubagentStatusResult> = {}): SubagentStatusResult {
@@ -40,15 +40,22 @@ test("view model groups statuses without heuristic needs-input", () => {
     ["done-child", "done"],
   ]);
   assert.equal(rows[0]?.activity, "Choose an auth path");
+  assert.equal(rows[0]?.detailKind, "question");
+  assert.equal(rows[0]?.primaryAction, "reply");
   assert.equal(rows.find((row) => row.id === "error-child")?.activity, "Tests failed");
+  assert.equal(rows.find((row) => row.id === "error-child")?.detailKind, "error");
+  assert.equal(rows.find((row) => row.id === "error-child")?.primaryAction, "details");
   assert.equal(rows.find((row) => row.id === "done-child")?.group, "done");
   assert.equal(rows.find((row) => row.id === "done-child")?.activity, "Should we proceed?");
   assert.equal(rows.find((row) => row.id === "done-child")?.resultFile, "001-result.md");
+  assert.equal(rows.find((row) => row.id === "done-child")?.primaryAction, "result");
   assert.equal(rows.find((row) => row.id === "done-child")?.canReply, false);
   assert.equal(rows.find((row) => row.id === "idle-child")?.canReply, true);
+  assert.equal(rows.find((row) => row.id === "idle-child")?.primaryAction, "reply");
   assert.equal(rows.find((row) => row.id === "error-child")?.canReply, false);
-  assert.equal(rows[0]?.attachCommand, "tmux attach-session -t pi-tmux-subagents-child");
+  assert.equal(rows[0]?.canAttach, true);
   assert.equal(groupCountSummary(rows), "1 needs input · 1 error · 1 running · 1 idle · 1 done");
+  assert.equal(compactGroupCountSummary(rows), "5 jobs · 1 input · 1 error");
 });
 
 test("view model prefixes fresh stage without overriding attention", () => {
@@ -61,7 +68,9 @@ test("view model prefixes fresh stage without overriding attention", () => {
   });
 
   assert.equal(rows.find((row) => row.id === running.job.id)?.activity, "testing · Running widget tests");
+  assert.equal(rows.find((row) => row.id === running.job.id)?.detailKind, "progress");
   assert.equal(rows.find((row) => row.id === attention.job.id)?.activity, "Choose path");
+  assert.equal(rows.find((row) => row.id === attention.job.id)?.detailKind, "question");
 });
 
 test("view model keeps nested parent metadata", () => {

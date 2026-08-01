@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents.js";
-import { formatAgentStatus, formatSubagentFooterStatus, formatSubagentPeekWidget, formatSubagentSummaryWidget, formatSubagentWidget } from "./format.js";
+import { formatAgentStatus } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
@@ -12,7 +12,9 @@ import { isFreshSessionSummary, readSessionSummaries, SESSION_SUMMARY_STALE_MS, 
 import { loadJobs } from "./state.js";
 import { createSubagentsLibraryView, formatAgentLibraryList } from "./subagents-library-view.js";
 import { createSubagentsView, type SubagentsViewAction } from "./subagents-view.js";
-import { toSubagentViewRows } from "./view-model.js";
+import { createSubagentsWidget, nextWidgetAgeRefreshMs } from "./subagents-widget.js";
+import { SUBAGENT_UI } from "./ui-tokens.js";
+import { toSubagentViewRows, type SubagentViewRow } from "./view-model.js";
 import type { AgentScope, SubagentStatusResult, TmuxSubagentJob } from "./types.js";
 
 type ToolParams = {
@@ -40,9 +42,9 @@ type PiContext = {
   cwd: string;
   mode?: string;
   ui?: {
-    theme?: { fg?: (token: any, text: string) => string; bold?: (text: string) => string };
+    theme?: { fg?: (token: any, text: string) => string; bg?: (token: any, text: string) => string; bold?: (text: string) => string };
     setStatus?: (key: string, text: string | undefined) => void;
-    setWidget?: (key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }) => void;
+    setWidget?: ExtensionContext["ui"]["setWidget"];
     notify?: (message: string, level?: "info" | "warning" | "error") => void;
     input?: (title: string, placeholder?: string, opts?: any) => Promise<string | undefined>;
     confirm?: (title: string, message: string, opts?: any) => Promise<boolean>;
@@ -55,22 +57,25 @@ const RECENT_STOPPED_STATUS_LIMIT = 5;
 const PACKAGE_NAME = "pi-tmux-subagents";
 const activeJobs = new Map<string, SubagentStatusResult>();
 let setStatus: ((text: string | undefined) => void) | undefined;
-let setWidget: ((content: string[] | undefined) => void) | undefined;
+let setWidget: ((rows: SubagentViewRow[] | undefined) => void) | undefined;
 let lastStatusText: string | undefined;
 let lastWidgetText: string | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
-let polling = false;
 let pollRoot: string | undefined;
-type SubagentWidgetMode = "summary" | "details" | "peek";
+let refreshQueue: Promise<unknown> = Promise.resolve();
+let refreshGeneration = 0;
+let activeViewDispose: (() => void) | undefined;
 
 const COMPLETION_RETENTION_MS = 10_000;
 const retainedCompletions = new Map<string, { status: SubagentStatusResult; expiresAt: number }>();
 let completionRetentionTimer: NodeJS.Timeout | undefined;
-let widgetThemeFg: ((token: any, text: string) => string) | undefined;
-let widgetMode: SubagentWidgetMode = "summary";
 let summaryCache = new Map<string, SessionSummaryMetadata>();
 let summaryRefreshSequence = 0;
 let summaryExpiryTimer: NodeJS.Timeout | undefined;
+let widgetAgeTimer: NodeJS.Timeout | undefined;
+let widgetRows: SubagentViewRow[] = [];
+let requestWidgetRender: (() => void) | undefined;
+let widgetSuppressionDepth = 0;
 
 function visibleStatuses(now = Date.now()): SubagentStatusResult[] {
   pruneCompletionRetentions(now);
@@ -144,7 +149,6 @@ function clearSummaryExpiryTimer() {
 
 function scheduleSummaryExpiryRefresh(now = Date.now()) {
   clearSummaryExpiryTimer();
-  if (widgetMode !== "summary" && widgetMode !== "peek") return;
   pruneSummaryCache(now);
   const visibleIds = new Set(visibleStatusIds(visibleStatuses(now)));
   let nextExpiry: number | undefined;
@@ -164,44 +168,72 @@ function scheduleSummaryExpiryRefresh(now = Date.now()) {
   summaryExpiryTimer.unref?.();
 }
 
-function toneWidgetLine(line: string): string {
-  if (!widgetThemeFg) return line;
-  const token = line.startsWith("tmux subagent") ? "muted"
-    : line.startsWith("+") || line.startsWith("╰") ? "dim"
-      : /[│ ]  ⎿/.test(line) ? "dim"
-        : /✗/.test(line) ? "error"
-          : /✸/.test(line) ? "warning"
-          : /⟳/.test(line) ? "accent"
-            : /✓/.test(line) ? "success"
-              : "muted";
-  return widgetThemeFg(token, line);
+function clearWidgetAgeTimer() {
+  if (widgetAgeTimer) clearTimeout(widgetAgeTimer);
+  widgetAgeTimer = undefined;
+}
+
+function scheduleWidgetAgeRefresh(now = Date.now()) {
+  clearWidgetAgeTimer();
+  const delay = nextWidgetAgeRefreshMs(widgetRows, now);
+  if (delay === undefined) return;
+  widgetAgeTimer = setTimeout(() => {
+    widgetAgeTimer = undefined;
+    requestWidgetRender?.();
+    scheduleWidgetAgeRefresh();
+  }, delay);
+  widgetAgeTimer.unref?.();
+}
+
+function widgetKey(rows: SubagentViewRow[]): string | undefined {
+  if (!rows.length) return undefined;
+  return JSON.stringify(rows.map((row) => ({
+    id: row.id,
+    group: row.group,
+    glyph: row.glyph,
+    name: row.name,
+    detail: row.detail,
+    updatedAt: row.updatedAt,
+    usage: row.usage,
+    cost: row.cost,
+    resultFile: row.resultFile,
+  })));
 }
 
 function applyParentUi() {
-  const statuses = visibleStatuses();
-  const widgetLines = widgetMode === "peek"
-    ? formatSubagentPeekWidget(statuses, summaryCache)
-    : widgetMode === "details"
-      ? formatSubagentWidget(statuses)
-      : formatSubagentSummaryWidget(statuses, { summaries: summaryCache });
-  const widgetText = widgetLines?.join("\n");
+  const rows = toSubagentViewRows(visibleStatuses(), { summaries: summaryCache });
+  const nextWidgetText = widgetSuppressionDepth > 0 ? undefined : widgetKey(rows);
+  widgetRows = rows;
 
   if (lastStatusText !== undefined) {
     setStatus?.(undefined);
     lastStatusText = undefined;
   }
-  if (widgetText !== lastWidgetText) {
-    setWidget?.(widgetLines);
-    lastWidgetText = widgetText;
+  if (nextWidgetText !== lastWidgetText) {
+    setWidget?.(nextWidgetText ? rows : undefined);
+    lastWidgetText = nextWidgetText;
   }
+  if (widgetSuppressionDepth > 0) clearWidgetAgeTimer();
+  else scheduleWidgetAgeRefresh();
 }
 
-async function refreshSummaryCacheFor(statuses: SubagentStatusResult[], mode: SubagentWidgetMode = widgetMode) {
-  if (mode !== "summary" && mode !== "peek") return;
+function suppressAmbientWidget(): () => void {
+  let released = false;
+  widgetSuppressionDepth += 1;
+  if (widgetSuppressionDepth === 1) refreshParentStatus();
+  return () => {
+    if (released) return;
+    released = true;
+    widgetSuppressionDepth = Math.max(0, widgetSuppressionDepth - 1);
+    if (widgetSuppressionDepth === 0) refreshParentStatus();
+  };
+}
+
+async function refreshSummaryCacheFor(statuses: SubagentStatusResult[]) {
   const ids = visibleStatusIds(statuses);
   const sequence = ++summaryRefreshSequence;
   const summaries = await readSessionSummaries(ids).catch(() => new Map<string, SessionSummaryMetadata>());
-  if (sequence !== summaryRefreshSequence || widgetMode !== mode || !sameIds(ids, visibleStatusIds(visibleStatuses()))) return;
+  if (sequence !== summaryRefreshSequence || !sameIds(ids, visibleStatusIds(visibleStatuses()))) return;
   summaryCache = summaries;
   scheduleSummaryExpiryRefresh();
   refreshParentStatus();
@@ -221,30 +253,12 @@ function trackJob(job: TmuxSubagentJob) {
 
 function startStatusPolling(root: string) {
   if (pollTimer || !hasActiveStatuses()) return;
-  pollTimer = setInterval(async () => {
-    if (polling) return;
+  pollTimer = setInterval(() => {
     if (!hasActiveStatuses()) {
       stopStatusPolling();
       return;
     }
-    polling = true;
-    try {
-      const ids = [...activeJobs.keys()];
-      const statuses = await Promise.all(ids.map(async (id) => {
-        const status = await getSubagentStatus(root, id).catch(() => undefined);
-        if (!status) return undefined;
-        return status.job.autoStopOnComplete ? autoStopCompletedSubagent(root, status) : status;
-      }));
-      for (const status of statuses) {
-        if (!status) continue;
-        activeJobs.set(status.job.id, status);
-        rememberCompletion(status);
-      }
-      await refreshSummaryCacheFor(visibleStatuses());
-      refreshParentStatus();
-    } finally {
-      polling = false;
-    }
+    void refreshSubagentSnapshot(root, "parent");
   }, 3000);
   pollTimer.unref?.();
 }
@@ -257,21 +271,6 @@ function stopStatusPolling() {
 function refreshParentStatus() {
   applyParentUi();
   if (!hasActiveStatuses()) stopStatusPolling();
-}
-
-function setWidgetMode(value: SubagentWidgetMode) {
-  widgetMode = value;
-  summaryCache = new Map();
-  summaryRefreshSequence++;
-  clearSummaryExpiryTimer();
-  lastWidgetText = undefined;
-  refreshParentStatus();
-  void refreshSummaryCacheFor(visibleStatuses(), value);
-}
-
-function toggleWidgetMode() {
-  setWidgetMode(widgetMode === "summary" ? "details" : "summary");
-  return widgetMode;
 }
 
 function normalizeDisplayName(value: string | undefined): string | undefined {
@@ -520,51 +519,81 @@ export function parseSubagentsCommand(args: string): ParsedSubagentsCommand {
   return { verb, id: idMatch?.[1], message: idMatch?.[2] };
 }
 
-async function currentStatuses(root: string): Promise<SubagentStatusResult[]> {
-  const jobs = await loadJobs(root);
-  const selected = selectStatusJobs(jobs.jobs, false);
-  return Promise.all(selected.jobs.map((job) => getSubagentStatus(root, job.id)));
+type RefreshScope = "parent" | "manager";
+type SubagentSnapshot = { statuses: SubagentStatusResult[]; summaries: Map<string, SessionSummaryMetadata>; rows: SubagentViewRow[] };
+
+async function refreshSubagentSnapshot(root: string, scope: RefreshScope): Promise<SubagentSnapshot> {
+  const generation = refreshGeneration;
+  const run = async (): Promise<SubagentSnapshot> => {
+    const jobs = scope === "manager"
+      ? selectStatusJobs((await loadJobs(root)).jobs, false).jobs
+      : [...activeJobs.values()].map((status) => status.job);
+    const ids = [...new Set(jobs.map((job) => job.id))];
+    const refreshed = await Promise.all(ids.map(async (id) => {
+      const status = await getSubagentStatus(root, id).catch(() => undefined);
+      if (!status) return undefined;
+      return status.job.autoStopOnComplete ? autoStopCompletedSubagent(root, status) : status;
+    }));
+    const statuses = refreshed.filter((status): status is SubagentStatusResult => Boolean(status));
+    const summaries = await readSessionSummaries(statuses.map((status) => status.job.id)).catch(() => new Map<string, SessionSummaryMetadata>());
+    const rows = toSubagentViewRows(statuses, { summaries });
+
+    if (generation === refreshGeneration) {
+      for (const status of statuses) {
+        activeJobs.set(status.job.id, status);
+        rememberCompletion(status);
+      }
+      summaryCache = summaries;
+      scheduleSummaryExpiryRefresh();
+      refreshParentStatus();
+      pollRoot = root;
+      if (hasActiveStatuses()) startStatusPolling(root);
+    }
+    return { statuses, summaries, rows };
+  };
+
+  const scheduled = refreshQueue.then(run, run);
+  refreshQueue = scheduled.then(() => undefined, () => undefined);
+  return scheduled;
 }
 
-async function handleSubagentsAction(action: SubagentsViewAction | undefined, root: string, ctx: PiContext) {
-  if (!action || action.type === "close") return;
-  if (action.type === "refresh") {
-    ctx.ui?.notify?.("Subagent view refreshed.", "info");
-    return openSubagentsView(root, ctx);
-  }
+async function handleSubagentsAction(action: SubagentsViewAction | undefined, root: string, ctx: PiContext): Promise<boolean> {
+  if (!action || action.type === "close") return false;
   let status: SubagentStatusResult;
   try {
     status = await getSubagentStatus(root, action.id);
   } catch {
     ctx.ui?.notify?.(`Unknown subagent: ${action.id}`, "error");
-    return;
+    return true;
   }
   if (action.type === "attach") {
     const command = `!tmux attach-session -t ${status.job.tmuxSession}`;
     ctx.ui?.setEditorText?.(command);
     ctx.ui?.notify?.(`Attach command ready: ${command}`, "info");
-    return;
+    return false;
   }
   if (action.type === "result") {
     const path = status.latestTurn?.resultPath ?? status.job.resultPath;
     ctx.ui?.notify?.(`Result: ${path}`, "info");
-    return;
+    return true;
   }
   if (action.type === "stop") {
     if (!action.confirmed) {
       const ok = await (ctx.ui?.confirm?.("Stop subagent", `Stop ${status.job.displayName ?? status.job.agentName}?`, { defaultValue: false }) ?? Promise.resolve(true));
-      if (!ok) return;
+      if (!ok) return true;
     }
     await cancelSubagent(root, status.job.id);
     ctx.ui?.notify?.(`Stopped ${status.job.id}.`, "info");
-    return;
+    return true;
   }
   if (action.type === "reply") {
     const message = await ctx.ui?.input?.(`Reply to ${status.job.displayName ?? status.job.agentName}`);
-    if (!message) return;
+    if (!message) return true;
     await sendSubagentAttentionReply(root, status.job.id, message);
     ctx.ui?.notify?.(`Sent reply to ${status.job.id}.`, "info");
+    return true;
   }
+  return true;
 }
 
 async function openSubagentsView(root: string, ctx: PiContext) {
@@ -572,9 +601,59 @@ async function openSubagentsView(root: string, ctx: PiContext) {
     ctx.ui?.notify?.("/subagents view requires TUI mode.", "error");
     return;
   }
-  const rows = toSubagentViewRows(await currentStatuses(root));
-  const action = await ctx.ui.custom((_tui: any, theme: any, _kb: unknown, done: (value: unknown) => void) => createSubagentsView(rows, theme, done as (value: SubagentsViewAction | undefined) => void));
-  await handleSubagentsAction(action as SubagentsViewAction | undefined, root, ctx);
+  let selectedId: string | undefined;
+  const restoreAmbientWidget = suppressAmbientWidget();
+  try {
+    while (true) {
+      const initial = await refreshSubagentSnapshot(root, "manager");
+      let disposeView = () => {};
+      let action: unknown;
+      try {
+        action = await ctx.ui.custom((tui: { requestRender?: () => void }, theme: any, _kb: unknown, done: (value: unknown) => void) => {
+          let disposed = false;
+          let refreshPromise: Promise<void> | undefined;
+          let component: ReturnType<typeof createSubagentsView>;
+          const refresh = () => {
+            if (refreshPromise) return refreshPromise;
+            refreshPromise = refreshSubagentSnapshot(root, "manager")
+              .then((snapshot) => {
+                if (!disposed) component.updateRows(snapshot.rows);
+              })
+              .finally(() => { refreshPromise = undefined; });
+            return refreshPromise;
+          };
+          component = createSubagentsView(initial.rows, theme, {
+            finish: done as (value: SubagentsViewAction | undefined) => void,
+            requestRender: () => tui.requestRender?.(),
+            refreshNow: refresh,
+          }, { selectedId });
+          const timer = setInterval(() => {
+            void refresh().catch((error) => {
+              clearInterval(timer);
+              if (!disposed) ctx.ui?.notify?.(`Subagent live refresh stopped: ${error instanceof Error ? error.message : String(error)}`, "error");
+            });
+          }, SUBAGENT_UI.refreshMs);
+          timer.unref?.();
+          disposeView = () => {
+            if (disposed) return;
+            disposed = true;
+            clearInterval(timer);
+            if (activeViewDispose === disposeView) activeViewDispose = undefined;
+          };
+          activeViewDispose?.();
+          activeViewDispose = disposeView;
+          return component;
+        });
+      } finally {
+        disposeView();
+      }
+      const viewAction = action as SubagentsViewAction | undefined;
+      if (viewAction && "id" in viewAction) selectedId = viewAction.id;
+      if (!await handleSubagentsAction(viewAction, root, ctx)) return;
+    }
+  } finally {
+    restoreAmbientWidget();
+  }
 }
 
 async function openSubagentsLibrary(cwd: string, ctx: PiContext) {
@@ -589,16 +668,10 @@ async function openSubagentsLibrary(cwd: string, ctx: PiContext) {
 async function handleSubagentsSlashCommand(args: string, ctx: PiContext) {
   const root = stateRoot();
   const parsed = parseSubagentsCommand(args);
-  if (parsed.verb === "peek") {
-    setWidgetMode("peek");
-    ctx.ui?.notify?.("Subagent peek shown.", "info");
-    return;
-  }
-  if (parsed.verb === "view") return openSubagentsView(root, ctx);
+  if (parsed.verb === "toggle" || parsed.verb === "view") return openSubagentsView(root, ctx);
   if (parsed.verb === "library") return openSubagentsLibrary(ctx.cwd, ctx);
   if (parsed.verb === "refresh") {
-    const statuses = await currentStatuses(root);
-    statuses.forEach(trackStatus);
+    await refreshSubagentSnapshot(root, "manager");
     ctx.ui?.notify?.("Subagent statuses refreshed.", "info");
     return;
   }
@@ -637,8 +710,7 @@ async function handleSubagentsSlashCommand(args: string, ctx: PiContext) {
     return;
   }
 
-  const mode = parsed.verb === "show" || parsed.verb === "on" || parsed.verb === "details" ? (setWidgetMode("details"), "details") : parsed.verb === "hide" || parsed.verb === "off" ? (setWidgetMode("summary"), "summary") : toggleWidgetMode();
-  ctx.ui?.notify?.(`Subagent details ${mode === "summary" ? "hidden" : "shown"}.`, "info");
+  ctx.ui?.notify?.(`Unknown subagents command: ${parsed.verb}. Use /subagents, /subagents library, reply, stop, attach, result, or refresh.`, "error");
 }
 
 export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
@@ -652,28 +724,37 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const ui = (ctx as PiContext).ui;
     setStatus = ui?.setStatus ? (text) => ui.setStatus?.(STATUS_KEY, text) : undefined;
-    widgetThemeFg = ui?.theme?.fg?.bind(ui.theme);
-    setWidget = ui?.setWidget ? (content) => {
-      if (!content) return ui.setWidget?.(STATUS_KEY, undefined);
-      const lines = content.map(toneWidgetLine);
-      return ui.setWidget?.(STATUS_KEY, lines, { placement: "belowEditor" });
+    setWidget = ui?.setWidget ? (rows) => {
+      if (!rows) {
+        requestWidgetRender = undefined;
+        return ui.setWidget?.(STATUS_KEY, undefined);
+      }
+      return ui.setWidget?.(STATUS_KEY, (tui: { requestRender?: () => void }, theme: any) => {
+        requestWidgetRender = () => tui.requestRender?.();
+        return createSubagentsWidget(rows, theme);
+      }, { placement: "belowEditor" });
     } : undefined;
     lastStatusText = "";
     lastWidgetText = "";
     refreshParentStatus();
   });
   pi.on("session_shutdown", async () => {
+    refreshGeneration += 1;
+    activeViewDispose?.();
+    activeViewDispose = undefined;
     setStatus?.(undefined);
     setWidget?.(undefined);
     setStatus = undefined;
     setWidget = undefined;
-    widgetThemeFg = undefined;
+    requestWidgetRender = undefined;
+    widgetRows = [];
+    widgetSuppressionDepth = 0;
     lastStatusText = undefined;
     lastWidgetText = undefined;
-    widgetMode = "summary";
     summaryCache = new Map();
     summaryRefreshSequence++;
     clearSummaryExpiryTimer();
+    clearWidgetAgeTimer();
     clearCompletionRetentionTimer();
     retainedCompletions.clear();
     stopStatusPolling();
@@ -681,19 +762,16 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand?.("subagents", {
-    description: "Manage tmux subagents: view, library, reply, stop, attach, result, refresh, details widget, or peek mode",
+    description: "Open the tmux subagent manager, browse the library, or run reply, stop, attach, result, and refresh actions",
     handler: async (args, ctx) => handleSubagentsSlashCommand(args, ctx as unknown as PiContext),
   });
 
-  const toggleShortcut = {
-    description: "Toggle tmux subagent details widget",
-    handler: async (ctx: ExtensionContext) => {
-      const mode = toggleWidgetMode();
-      ctx.ui?.notify?.(`Subagent details ${mode === "summary" ? "hidden" : "shown"}.`, "info");
-    },
+  const openManagerShortcut = {
+    description: "Open the tmux subagent manager",
+    handler: async (ctx: ExtensionContext) => openSubagentsView(stateRoot(), ctx as unknown as PiContext),
   };
-  pi.registerShortcut?.("alt+s", toggleShortcut);
-  pi.registerShortcut?.("ctrl+alt+s", toggleShortcut);
+  pi.registerShortcut?.("alt+s", openManagerShortcut);
+  pi.registerShortcut?.("ctrl+alt+s", openManagerShortcut);
 
   pi.registerTool({
     name: "tmux_subagent",

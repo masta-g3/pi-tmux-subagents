@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Replace the overlapping subagent summary/details/peek modes with one ambient process widget and one live `/subagents` manager.
+- Add responsive monitoring layouts, contextual actions, inline result excerpts, live refresh, and selection-preserving updates.
+- Remove the `show`, `hide`, `details`, `peek`, `on`, and `off` subagent command modes.
+
 ## 0.1.1 - 2026-05-26
 
 - Improve `pi-agent-hub` mirroring so subagent rows use the current hub identifiers and stay grouped under their parent session.

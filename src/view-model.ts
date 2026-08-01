@@ -4,24 +4,27 @@ import { isFreshSessionSummary } from "./session-summary.js";
 import type { SubagentStatusResult, TmuxSubagentUsage } from "./types.js";
 
 export type SubagentPresentationGroup = "needsInput" | "running" | "idle" | "done" | "error";
+export type SubagentDetailKind = "question" | "error" | "progress" | "task" | "result";
+export type SubagentPrimaryAction = "reply" | "result" | "details";
 
 export interface SubagentViewRow {
   id: string;
-  shortId: string;
   name: string;
-  agentName: string;
   group: SubagentPresentationGroup;
   glyph: string;
   stateLabel: string;
   activity: string;
+  detailKind: SubagentDetailKind;
+  detail: string;
+  primaryAction: SubagentPrimaryAction;
+  updatedAt: number;
   age: string;
   usage?: string;
+  cost?: number;
   resultFile?: string;
-  tmuxSession: string;
-  attachCommand: string;
   canReply: boolean;
   canStop: boolean;
-  canPeek: boolean;
+  canAttach: boolean;
   parentId?: string;
   status: SubagentStatusResult;
 }
@@ -108,26 +111,32 @@ function stagePrefix(metadata: SessionSummaryMetadata | undefined, now: number):
   return metadata.stage;
 }
 
-function activityFor(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): string {
+function detailFor(status: SubagentStatusResult, summaries: Map<string, SessionSummaryMetadata>, now: number): { kind: SubagentDetailKind; text: string } {
   if (status.status === "error") {
     const error = cleanActivity(status.job.error);
-    if (error) return error;
+    if (error) return { kind: "error", text: error };
   }
   const attention = status.status !== "stopped" ? cleanActivity(status.heartbeat?.attention?.message) : undefined;
-  if (attention) return attention;
+  if (attention) return { kind: "question", text: attention };
   const metadata = summaries.get(status.job.id);
   if (metadata && isFreshSessionSummary(metadata, now)) {
     const semantic = cleanActivity(metadata.status ?? metadata.goal ?? metadata.nextStep);
     const stage = status.status === "running" || status.status === "starting" ? stagePrefix(metadata, now) : undefined;
-    if (stage && semantic) return `${stage} · ${semantic}`;
-    if (semantic) return semantic;
-    if (stage) return stage;
+    if (stage && semantic) return { kind: "progress", text: `${stage} · ${semantic}` };
+    if (semantic) return { kind: "progress", text: semantic };
+    if (stage) return { kind: "progress", text: stage };
   }
   const turn = cleanActivity(status.latestTurn?.messagePreview);
-  if (turn) return turn;
+  if (turn) return { kind: "progress", text: turn };
   const result = resultFile(status);
-  if ((status.status === "waiting" || status.status === "stopped" || status.status === "error") && result) return `result ${result}`;
-  return cleanActivity(status.job.taskPreview) ?? "—";
+  if ((status.status === "waiting" || status.status === "stopped" || status.status === "error") && result) return { kind: "result", text: `result ${result}` };
+  return { kind: "task", text: cleanActivity(status.job.taskPreview) ?? "—" };
+}
+
+function primaryAction(group: SubagentPresentationGroup, status: SubagentStatusResult): SubagentPrimaryAction {
+  if (group === "needsInput" || group === "idle") return "reply";
+  if (group === "done" && hasResult(status)) return "result";
+  return "details";
 }
 
 function rowUpdatedAt(status: SubagentStatusResult): number {
@@ -140,23 +149,26 @@ export function toSubagentViewRows(statuses: SubagentStatusResult[], options: Su
   return statuses.map((status) => {
     const group = groupFor(status);
     const state = stateFor(group);
+    const detail = detailFor(status, summaries, now);
+    const updatedAt = rowUpdatedAt(status);
     return {
       id: status.job.id,
-      shortId: status.job.id.slice(0, 12),
       name: status.job.displayName ?? status.job.agentName,
-      agentName: status.job.agentName,
       group,
       glyph: state.glyph,
       stateLabel: state.label,
-      activity: activityFor(status, summaries, now),
-      age: formatDuration(now - rowUpdatedAt(status)),
+      activity: detail.text,
+      detailKind: detail.kind,
+      detail: detail.text,
+      primaryAction: primaryAction(group, status),
+      updatedAt,
+      age: formatDuration(now - updatedAt),
       usage: compactUsage(status),
+      cost: statusUsage(status)?.cost.total,
       resultFile: resultFile(status),
-      tmuxSession: status.job.tmuxSession,
-      attachCommand: `tmux attach-session -t ${status.job.tmuxSession}`,
       canReply: group === "idle" || group === "needsInput",
-      canStop: status.status !== "stopped",
-      canPeek: true,
+      canStop: status.status !== "stopped" && !status.autoStopped,
+      canAttach: status.status !== "stopped" && !status.autoStopped,
       parentId: status.job.parentId,
       status,
     };
@@ -179,6 +191,22 @@ export function groupSubagentRows(rows: SubagentViewRow[]): Map<SubagentPresenta
     grouped.set(row.group, list);
   }
   return grouped;
+}
+
+export function compactGroupCountSummary(rows: SubagentViewRow[]): string {
+  const grouped = groupSubagentRows(rows);
+  const needsInput = grouped.get("needsInput")?.length ?? 0;
+  const errors = grouped.get("error")?.length ?? 0;
+  const parts = [`${rows.length} job${rows.length === 1 ? "" : "s"}`];
+  if (needsInput) parts.push(`${needsInput} input`);
+  if (errors) parts.push(`${errors} error`);
+  if (!needsInput && !errors) {
+    const running = grouped.get("running")?.length ?? 0;
+    const idle = grouped.get("idle")?.length ?? 0;
+    if (running) parts.push(`${running} running`);
+    if (idle) parts.push(`${idle} idle`);
+  }
+  return parts.join(" · ");
 }
 
 export function groupCountSummary(rows: SubagentViewRow[]): string {
