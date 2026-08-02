@@ -2,7 +2,7 @@
 name: worker
 description: Focused implementation agent for small, approved coding tasks
 model: openai-codex/gpt-5.6-sol
-thinking: high
+thinking: medium
 tools: read, bash, edit, write
 systemPromptMode: replace
 inheritProjectContext: true
