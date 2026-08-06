@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-08-05
 
-- Replace the overlapping subagent summary/details/peek modes with one ambient process widget and one live `/subagents` manager.
-- Add responsive monitoring layouts, contextual actions, inline result excerpts, live refresh, and selection-preserving updates.
-- Remove the `show`, `hide`, `details`, `peek`, `on`, and `off` subagent command modes.
+- Replace overlapping summary/details/peek modes with one ambient process widget and one live `/subagents` manager.
+- Add persistent follow-up turns, explicit attention handling, nested delegation controls, launch-time model overrides, and optional parent guidance.
+- Improve child cleanup, result retrieval, Agent Hub metadata integration, responsive monitoring, and contextual manager actions.
+- Prefer enabled local development installs over the npm package to prevent duplicate `tmux_subagent` registration.
+- Update packaged agent roles, model pins, and reasoning levels.
 
 ## 0.1.1 - 2026-05-26
 
