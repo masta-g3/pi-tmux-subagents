@@ -363,6 +363,27 @@ function formatJobsStatus(jobs: TmuxSubagentJob[], includeStopped: boolean): str
   return lines.join("\n") || "No tmux subagent jobs.";
 }
 
+type StatusWarning = { jobId: string; error: string };
+
+function statusWarningText(warnings: StatusWarning[]): string | undefined {
+  if (!warnings.length) return undefined;
+  return `Warning: ${warnings.length} active child status${warnings.length === 1 ? "" : "es"} could not be refreshed; showing saved registry state.`;
+}
+
+async function readGlobalStatuses(root: string, jobs: TmuxSubagentJob[]): Promise<{ statuses: SubagentStatusResult[]; warnings: StatusWarning[] }> {
+  const warnings: StatusWarning[] = [];
+  const statuses = await Promise.all(jobs.map(async (job): Promise<SubagentStatusResult> => {
+    if (job.status === "stopped") return { job, status: "stopped" };
+    try {
+      return await getSubagentStatus(root, job.id);
+    } catch (error) {
+      warnings.push({ jobId: job.id, error: error instanceof Error ? error.message : String(error) });
+      return { job, status: job.status };
+    }
+  }));
+  return { statuses, warnings };
+}
+
 const TmuxSubagentParams = {
   type: "object",
   properties: {
@@ -838,8 +859,9 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           const jobs = await loadJobs(root);
           const visibleJobs = inNestedSession ? jobs.jobs.filter((job) => nestedCanAccessJob(job, nestedPolicy.childId)) : jobs.jobs;
           const selected = selectStatusJobs(visibleJobs, params.includeStopped ?? false);
-          const statuses = await Promise.all(selected.jobs.map((job) => getSubagentStatus(root, job.id)));
-          return reply(formatJobsStatus(visibleJobs, params.includeStopped ?? false), { ...jobs, jobs: selected.jobs, statuses, hiddenStopped: selected.hiddenStopped });
+          const { statuses, warnings: statusWarnings } = await readGlobalStatuses(root, selected.jobs);
+          const content = [formatJobsStatus(visibleJobs, params.includeStopped ?? false), statusWarningText(statusWarnings)].filter(Boolean).join("\n");
+          return reply(content, { ...jobs, jobs: selected.jobs, statuses, hiddenStopped: selected.hiddenStopped, statusWarnings });
         }
         const initialStatus = await getSubagentStatus(root, id);
         if (inNestedSession && !nestedCanAccessJob(initialStatus.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);

@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { heartbeatPath, turnResultPath, turnsPath } from "./paths.js";
 import type { TmuxSubagentAttention, TmuxSubagentHeartbeat, TmuxSubagentTurnsRegistry, TmuxSubagentUsage } from "./types.js";
@@ -14,7 +15,13 @@ const HEARTBEAT_INTERVAL_MS = 2000;
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await rename(temporaryPath, path);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
 }
 
 function finalAssistantText(messages: MessageLike[] | undefined): string | undefined {

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { setImmediate as waitImmediate } from "node:timers/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import childBootstrap from "../src/child-bootstrap.js";
@@ -100,6 +101,67 @@ test("child bootstrap records and clears ask_question attention", async () => {
     assert.equal(heartbeat.attention, undefined);
 
     await handlers.session_shutdown?.({ type: "session_shutdown" } as any, { cwd: root });
+  });
+});
+
+test("child bootstrap never exposes partial control JSON during overlapping writes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-atomic-json-test-"));
+  const hubDir = join(root, "hub");
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  const heartbeatPath = join(root, "jobs", "child-1", "heartbeat.json");
+  const turnsPath = join(root, "jobs", "child-1", "turns", "turns.json");
+  const hubHeartbeatPath = join(hubDir, "heartbeats", "child-1.json");
+  await mkdir(join(root, "jobs", "child-1", "turns"), { recursive: true });
+  await mkdir(join(hubDir, "heartbeats"), { recursive: true });
+  await writeFile(heartbeatPath, JSON.stringify({ state: "waiting" }), "utf8");
+  await writeFile(turnsPath, JSON.stringify({ version: 1, turns: Array.from({ length: 4_000 }, (_, index) => ({ index: index + 1, status: "waiting", resultPath: `/tmp/${index}`, messagePreview: "x".repeat(120) })) }), "utf8");
+  await writeFile(hubHeartbeatPath, JSON.stringify({ state: "waiting" }), "utf8");
+
+  await withChildEnv(root, resultPath, async () => {
+    process.env.PI_AGENT_HUB_DIR = hubDir;
+    process.env.PI_AGENT_HUB_SESSION_ID = "child-1";
+    process.env.PI_SUBAGENT_TASK_PREVIEW = "task".repeat(250_000);
+    const handlers = loadBootstrapHandlers();
+    const watching = { active: true };
+    const parseErrors: Error[] = [];
+    let observations = 0;
+    const watch = async (path: string) => {
+      while (watching.active) {
+        try {
+          JSON.parse(await readFile(path, "utf8"));
+          observations += 1;
+        } catch (error) {
+          parseErrors.push(error as Error);
+        }
+        await waitImmediate();
+      }
+    };
+    const readers = [heartbeatPath, turnsPath, hubHeartbeatPath].map(watch);
+    try {
+      await waitImmediate();
+      const largeCwd = `/tmp/${"cwd".repeat(250_000)}`;
+      await handlers.session_start?.({ type: "session_start" } as any, { cwd: largeCwd });
+      await Promise.all([
+        ...Array.from({ length: 12 }, () => handlers.agent_start?.({ type: "agent_start" } as any, { cwd: `${largeCwd}-running` })),
+        ...Array.from({ length: 4 }, (_, index) => handlers.agent_end?.({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: `result ${index}` }] }] } as any, { cwd: `${largeCwd}-done` })),
+      ]);
+      watching.active = false;
+      await Promise.all(readers);
+
+      assert.ok(observations > 0);
+      assert.deepEqual(parseErrors, []);
+      for (const path of [heartbeatPath, turnsPath, hubHeartbeatPath]) JSON.parse(await readFile(path, "utf8"));
+      const temporaryFiles = [
+        ...readdirSync(join(root, "jobs", "child-1")),
+        ...readdirSync(join(root, "jobs", "child-1", "turns")),
+        ...readdirSync(join(hubDir, "heartbeats")),
+      ].filter((name) => name.endsWith(".tmp"));
+      assert.deepEqual(temporaryFiles, []);
+    } finally {
+      watching.active = false;
+      await Promise.all(readers);
+      await handlers.session_shutdown?.({ type: "session_shutdown" } as any, { cwd: root });
+    }
   });
 });
 

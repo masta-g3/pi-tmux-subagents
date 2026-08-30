@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { setImmediate as waitImmediate } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -266,6 +266,88 @@ test("tmux_subagent global status hides old stopped jobs unless requested", asyn
     assert.match(full.content[0].text, /stopped-1 stopped scout: Stopped 1/);
     assert.doesNotMatch(full.content[0].text, /older stopped child hidden/);
     assert.equal(full.details.jobs.length, 8);
+  } finally {
+    restorePiEnv();
+  }
+});
+
+test("tmux_subagent full-history status does not hydrate stopped jobs through tmux", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-lightweight-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const binDir = join(root, "bin");
+  const logPath = join(root, "tmux.log");
+  mkdirSync(state, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  const jobs = Array.from({ length: 200 }, (_, index) => ({
+    id: `stopped-${String(index + 1).padStart(3, "0")}`,
+    agentName: "scout",
+    taskPreview: `Historical job ${index + 1}`,
+    cwd: root,
+    tmuxSession: `missing-stopped-${index + 1}`,
+    status: "stopped",
+    resultPath: join(state, "jobs", `stopped-${index + 1}`, "result.md"),
+    createdAt: index + 1,
+    updatedAt: index + 1,
+  }));
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({ version: 1, jobs }, null, 2)}\n`);
+  const tmuxPath = join(binDir, "tmux");
+  writeFileSync(tmuxPath, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\nexit 0\n");
+  chmodSync(tmuxPath, 0o755);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  const oldPath = process.env.PATH;
+  const oldTmuxLog = process.env.TMUX_LOG;
+  process.env.PATH = `${binDir}:${oldPath ?? ""}`;
+  process.env.TMUX_LOG = logPath;
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { action: "status", includeStopped: true }, undefined, undefined, { cwd: root });
+
+    assert.match(result.content[0].text, /stopped-200 stopped scout: Historical job 200/);
+    assert.match(result.content[0].text, /stopped-001 stopped scout: Historical job 1/);
+    assert.equal(result.details.statuses.length, 200);
+    assert.equal(existsSync(logPath), false);
+  } finally {
+    restorePiEnv();
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    if (oldTmuxLog === undefined) delete process.env.TMUX_LOG;
+    else process.env.TMUX_LOG = oldTmuxLog;
+  }
+});
+
+test("tmux_subagent global status returns partial data when an active child cannot be read", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-partial-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const badId = "active-bad-heartbeat";
+  mkdirSync(join(state, "jobs", badId), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [
+      { id: badId, agentName: "worker", taskPreview: "Unreadable active job", cwd: root, tmuxSession: "bad-active-session", status: "running", resultPath: join(state, "jobs", badId, "result.md"), createdAt: 10, updatedAt: 20 },
+      { id: "stopped-good", agentName: "scout", taskPreview: "Readable history", cwd: root, tmuxSession: "missing-stopped-good", status: "stopped", resultPath: join(state, "jobs", "stopped-good", "result.md"), createdAt: 1, updatedAt: 2 },
+    ],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", badId, "heartbeat.json"), "{\n");
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { action: "status", includeStopped: true }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, undefined);
+    assert.match(result.content[0].text, /active-bad-h running worker: Unreadable active job/);
+    assert.match(result.content[0].text, /stopped-good stopped scout: Readable history/);
+    assert.match(result.content[0].text, /Warning: 1 active child status could not be refreshed; showing saved registry state\./);
+    assert.equal(result.details.statusWarnings.length, 1);
+    assert.equal(result.details.statusWarnings[0].jobId, badId);
+    assert.match(result.details.statusWarnings[0].error, /JSON/);
   } finally {
     restorePiEnv();
   }
