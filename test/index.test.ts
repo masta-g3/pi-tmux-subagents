@@ -3,6 +3,7 @@ import test from "node:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { setImmediate as waitImmediate } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import extension, { parseSubagentsCommand, resolveAutoStopOnComplete, shouldSkipNpmPackageForLocalDev } from "../src/index.js";
@@ -77,6 +78,52 @@ function isolatePiStateEnv(agentDir: string): () => void {
     else process.env.PI_TMUX_SUBAGENTS_JOB_ID = oldTmuxJobId;
   };
 }
+
+test("background refresh reports UI failures instead of rejecting unhandled", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-poll-error-test-"));
+  const restorePiEnv = isolatePiStateEnv(join(root, "agent"));
+  const sessionName = `pi-tmux-poll-error-${process.pid}`;
+  const handlers = new Map<string, Function>();
+  let tool: any;
+  let poll: (() => void) | undefined;
+  let failWidget = false;
+  const notices: string[] = [];
+  t.mock.method(globalThis, "setInterval", (callback: () => void) => {
+    poll = callback;
+    return { unref() {} };
+  });
+  try {
+    createTmuxSession(sessionName);
+    const stateDir = join(root, "agent", "pi-tmux-subagents");
+    const jobDir = join(stateDir, "jobs", "poll-child");
+    mkdirSync(jobDir, { recursive: true });
+    const now = Date.now();
+    const job = { id: "poll-child", agentName: "scout", taskPreview: "Inspect", cwd: root, tmuxSession: sessionName, status: "running", createdAt: now, updatedAt: now, resultPath: join(jobDir, "result.md"), autoStopOnComplete: false };
+    writeFileSync(join(stateDir, "jobs.json"), JSON.stringify({ version: 1, jobs: [job] }));
+    const heartbeat = { state: "running", seenRunning: true, updatedAt: now };
+    writeFileSync(join(jobDir, "heartbeat.json"), JSON.stringify(heartbeat));
+    extension({ on(name: string, handler: Function) { handlers.set(name, handler); }, registerTool(value: any) { tool = value; } } as any);
+    await handlers.get("session_start")?.({}, { cwd: root, ui: {
+      setStatus() {},
+      setWidget() { if (failWidget) throw new Error("Widget unavailable"); },
+      notify(message: string) { notices.push(message); },
+    } });
+    await tool.execute("status", { action: "status", childId: job.id });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(poll);
+    failWidget = true;
+    writeFileSync(join(jobDir, "heartbeat.json"), JSON.stringify({ ...heartbeat, updatedAt: now + 1 }));
+    poll();
+    for (let attempt = 0; attempt < 100 && !notices.length; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.match(notices.join("\n"), /Subagent.*refresh.*Widget unavailable/);
+  } finally {
+    failWidget = false;
+    await handlersShutdown(handlers);
+    killTmuxSession(sessionName);
+    restorePiEnv();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("tmux_subagent uses canonical parent status and widget keys", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-test-"));

@@ -4,9 +4,9 @@ Pi extension for launching Markdown-defined subagents as real tmux-backed Pi ses
 
 ## Requirements
 
-- Pi coding agent with package support.
+- Pi coding agent 0.80.5 or newer.
 - `tmux` available on `PATH`.
-- Node.js 20 or newer for local development and npm installs.
+- Node.js 22.19.0 or newer.
 
 ## Install
 
@@ -16,7 +16,7 @@ Install from npm:
 pi install npm:pi-tmux-subagents
 ```
 
-Restart any already-running parent Pi sessions after installing or updating; Pi loads extension code at process start.
+Reload or restart parent Pi sessions after installing or updating. Running children keep their loaded code; finish or stop them before relaunching to use an update.
 
 Local development install:
 
@@ -28,7 +28,7 @@ npm test
 pi install "$PWD"
 ```
 
-Re-run `npm run build` after local changes, then restart parent Pi sessions that should use the updated extension. If both `npm:pi-tmux-subagents` and a local-path install are enabled, the npm-installed copy self-disables so the local checkout can register `tmux_subagent` without a duplicate-tool conflict.
+Re-run `npm run build` after local changes, then reload or restart parent Pi sessions. If both `npm:pi-tmux-subagents` and a local-path install are enabled, the npm-installed copy self-disables so the local checkout can register `tmux_subagent` without a duplicate-tool conflict.
 
 ## Agent files
 
@@ -88,7 +88,7 @@ tmux_subagent({ action: "status", childId: "abc123" })
 tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 ```
 
-Child sessions auto-stop after clean completion by default so completed subagents do not clutter tmux or `pi-agent-hub` dashboards. Pass `autoStopOnComplete: false` when you want to inspect, attach, or send follow-up messages after completion, then use `action: "stop"` when done. Auto-stop only applies after clean completion; failed or interrupted sessions stay alive for inspection. Background jobs auto-stop when a later `status` call or parent UI poll observes clean completion.
+Child sessions auto-stop after successful completion by default. Completion waits until automatic retries, compaction, and queued follow-ups finish. Failed or aborted runs, and failures to save results, stay alive for inspection. A later `status` call or parent UI poll stops completed background jobs. Pass `autoStopOnComplete: false` to inspect, attach, or send follow-up messages after completion, then use `action: "stop"` when done.
 
 Persistent children support generic follow-up turns through `action: "send"`. By default `send` returns after pasting the message into the live child; pass `wait: true` to wait for the next completed turn. Multiline messages are bracket-pasted with newlines preserved, then submitted once. When a child invokes Pi's explicit `ask_question` flow, the heartbeat carries first-class attention metadata so `send` can answer that running child without treating all busy children as replyable.
 
@@ -100,9 +100,11 @@ Every `tmux_subagent` call also performs a lightweight cleanup sweep: completed 
 
 Unfiltered `action: "status"` is intentionally compact: it shows active/error jobs plus the 5 most recently stopped jobs, then reports how many older stopped jobs are hidden. Pass `includeStopped: true` to inspect the full historical list. If a live child cannot be refreshed, global status still returns the saved state and a warning.
 
+`Subagent background refresh stopped` means automatic parent polling has stopped. Resolve the reported error, then use `/subagents refresh` to retry. A child reporting `Subagent heartbeat stopped` is no longer publishing periodic status; treat its displayed status as potentially stale until the file error is resolved and the child is relaunched.
+
 The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact, width-aware below-editor widget for active, errored, persistent-idle, attention-needed, or briefly retained completed children. Questions and errors sort first and receive semantic color; routine states stay neutral. Fresh Agent Hub `session-metadata/<child-id>.json` can provide compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`), with turn/result/task text as fallback. Ages continue updating even after active polling stops. The extension still never generates summaries, calls a model, scrapes panes, or persists raw prompts/output for summaries. Open the live interactive manager with `/subagents`, `/subagents view`, `alt+s`, or `ctrl+alt+s`; use `/subagents library` to browse available Markdown agents read-only.
 
-Each completed child turn captures the final assistant message into a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling. This control-plane capture is handled by the child bootstrap and does not require the agent to have project file write access. Terminal tool results keep the rendered card compact, but the model-visible text includes the absolute result path plus a ready-to-use `read({ path, limit: 2000 })` hint; idle persistent children also include a `stop` reminder.
+Each successfully settled child run captures its final assistant message into a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling. This control-plane capture is handled by the child bootstrap and does not require the agent to have project file write access. Terminal tool results keep the rendered card compact, but the model-visible text includes the absolute result path plus a ready-to-use `read({ path, limit: 2000 })` hint; idle persistent children also include a `stop` reminder.
 
 Nested tmux subagents are disabled by default. Set `allowNestedSubagents: true` plus `nestedAgentAllowlist` to expose `tmux_subagent` inside the child for explicitly requested specialist agents; nested children do not receive nested-launch permission by default. Use `maxNestedDepth` to cap allowed child launch depth. The interactive manager keeps parent lineage available in selected-row details when the job has a `parentId`; full tree rendering is intentionally deferred so attention and errors remain top-level scannable.
 

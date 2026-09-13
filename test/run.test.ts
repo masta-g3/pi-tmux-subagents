@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { autoStopCompletedSubagent, cleanupCompletedSubagents, launchSubagent, getSubagentStatus, cancelSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent } from "../src/run.js";
@@ -158,6 +158,21 @@ test("getSubagentStatus reads heartbeat result and pane preview", async () => wi
   assert.equal(status.preview, "pane preview");
 }));
 
+test("getSubagentStatus rejects malformed usage before rendering", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-invalid-usage-test-"));
+  const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
+  try {
+    const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect", background: true, tmux });
+    const heartbeat = join(root, "jobs", job.id, "heartbeat.json");
+    for (const usage of [{ input: 1, output: 2 }, { input: 1, output: 2, cost: { total: "0.1" } }]) {
+      await writeFile(heartbeat, JSON.stringify({ state: "running", seenRunning: true, usage }));
+      await assert.rejects(getSubagentStatus(root, job.id, tmux), /Invalid usage/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}));
+
 test("getSubagentStatus keeps latestResult scoped to turn results", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-legacy-status-test-"));
   const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
@@ -247,6 +262,31 @@ test("autoStopCompletedSubagent stops clean completed jobs and preserves done re
   assert.equal(status.autoStopped, true);
   assert.equal((await loadJobs(root)).jobs[0]?.status, "stopped");
   assert.equal(calls.at(-1)?.[0], "kill-session");
+}));
+
+test("getSubagentStatus preserves child errors in the Agent Hub mirror", async () => withAgentHub(async (hubDir) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-error-mirror-test-"));
+  const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
+  const registryPath = join(hubDir, "registry.json");
+  try {
+    await writeFile(registryPath, JSON.stringify({ version: 1, sessions: [
+      { id: "parent-1", title: "parent", cwd: root, group: "default", tmuxSession: "parent", status: "running", createdAt: 1, updatedAt: 1 },
+    ] }));
+    process.env.PI_AGENT_HUB_SESSION_ID = "parent-1";
+    const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect", background: true, tmux });
+    const heartbeatPath = join(root, "jobs", job.id, "heartbeat.json");
+    await writeFile(heartbeatPath, JSON.stringify({ state: "error", seenRunning: true, message: "Provider failed" }));
+    const status = await getSubagentStatus(root, job.id, tmux);
+    assert.equal(status.job.error, "Provider failed");
+    const mirroredJob = async () => JSON.parse(await readFile(registryPath, "utf8")).sessions.find((row: { id: string }) => row.id === job.id);
+    assert.equal((await mirroredJob()).error, "Provider failed");
+    await writeFile(heartbeatPath, JSON.stringify({ state: "running", seenRunning: true }));
+    await getSubagentStatus(root, job.id, tmux);
+    assert.equal((await mirroredJob()).error, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(hubDir, { recursive: true, force: true });
+  }
 }));
 
 test("autoStopCompletedSubagent removes mirrored pi-agent-hub rows after clean completion", async () => withAgentHub(async (hubDir) => {

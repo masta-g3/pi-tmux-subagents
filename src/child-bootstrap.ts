@@ -6,7 +6,7 @@ import { heartbeatPath, turnResultPath, turnsPath } from "./paths.js";
 import type { TmuxSubagentAttention, TmuxSubagentHeartbeat, TmuxSubagentTurnsRegistry, TmuxSubagentUsage } from "./types.js";
 
 type PiContext = { cwd: string };
-type MessageLike = { role?: string; content?: unknown; usage?: Partial<TmuxSubagentUsage> & { cost?: Partial<TmuxSubagentUsage["cost"]> } };
+type MessageLike = { role?: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: Partial<TmuxSubagentUsage> & { cost?: Partial<TmuxSubagentUsage["cost"]> } };
 
 const EXTENSION_KEY = Symbol.for("pi-tmux-subagents.child-bootstrap.loaded");
 type GlobalState = typeof globalThis & { [EXTENSION_KEY]?: true };
@@ -24,14 +24,15 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   }
 }
 
-function finalAssistantText(messages: MessageLike[] | undefined): string | undefined {
-  let message: MessageLike | undefined;
+function finalAssistantMessage(messages: MessageLike[] | undefined): MessageLike | undefined {
   for (let i = (messages?.length ?? 0) - 1; i >= 0; i -= 1) {
-    if (messages?.[i]?.role === "assistant") {
-      message = messages[i];
-      break;
-    }
+    if (messages?.[i]?.role === "assistant") return messages[i];
   }
+  return undefined;
+}
+
+function finalAssistantText(messages: MessageLike[] | undefined): string | undefined {
+  const message = finalAssistantMessage(messages);
   if (!message) return undefined;
   if (typeof message.content === "string") return message.content.trim();
   if (!Array.isArray(message.content)) return undefined;
@@ -137,8 +138,12 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
   let latestUsage: TmuxSubagentUsage | undefined;
   let attention: TmuxSubagentAttention | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let heartbeatQueue: Promise<void> = Promise.resolve();
+  let pendingMessages: MessageLike[] | undefined;
+  let currentMessage: string | undefined;
 
-  async function heartbeat(state: TmuxSubagentHeartbeat["state"], ctx: PiContext, message?: string) {
+  function heartbeat(state: TmuxSubagentHeartbeat["state"], ctx: PiContext, message?: string): Promise<void> {
+    if (state !== currentState || message !== undefined) currentMessage = message;
     if (state !== currentState) {
       currentState = state;
       stateSince = Date.now();
@@ -150,39 +155,42 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
       cwd: ctx.cwd,
       state,
       stateSince,
-      message,
+      message: currentMessage,
       updatedAt: now,
       seenRunning,
       usage: latestUsage,
       attention,
     };
-    await writeJson(heartbeatPath(stateRoot, jobId), data);
-
-    if (process.env.PI_AGENT_HUB_DIR && process.env.PI_AGENT_HUB_SESSION_ID) {
-      await writeJson(join(process.env.PI_AGENT_HUB_DIR, "heartbeats", `${process.env.PI_AGENT_HUB_SESSION_ID}.json`), {
-        managedSessionId: process.env.PI_AGENT_HUB_SESSION_ID,
-        cwd: ctx.cwd,
-        state,
-        stateSince,
-        message,
-        updatedAt: now,
-        kind: process.env.PI_AGENT_HUB_KIND,
-        parentId: process.env.PI_AGENT_HUB_PARENT_ID,
-        agentName: process.env.PI_SUBAGENT_DISPLAY_NAME ?? process.env.PI_SUBAGENT_AGENT,
-        agentType: process.env.PI_SUBAGENT_AGENT,
-        taskPreview: process.env.PI_SUBAGENT_TASK_PREVIEW,
-        resultPath: process.env.PI_SUBAGENT_RESULT_PATH,
-        usage: latestUsage,
-        attention,
-      });
-    }
+    const publish = async () => {
+      await writeJson(heartbeatPath(stateRoot, jobId), data);
+      if (process.env.PI_AGENT_HUB_DIR && process.env.PI_AGENT_HUB_SESSION_ID) {
+        await writeJson(join(process.env.PI_AGENT_HUB_DIR, "heartbeats", `${process.env.PI_AGENT_HUB_SESSION_ID}.json`), {
+          ...data,
+          managedSessionId: process.env.PI_AGENT_HUB_SESSION_ID,
+          kind: process.env.PI_AGENT_HUB_KIND,
+          parentId: process.env.PI_AGENT_HUB_PARENT_ID,
+          agentName: process.env.PI_SUBAGENT_DISPLAY_NAME ?? process.env.PI_SUBAGENT_AGENT,
+          agentType: process.env.PI_SUBAGENT_AGENT,
+          taskPreview: process.env.PI_SUBAGENT_TASK_PREVIEW,
+          resultPath: process.env.PI_SUBAGENT_RESULT_PATH,
+        });
+      }
+    };
+    heartbeatQueue = heartbeatQueue.then(publish, publish);
+    return heartbeatQueue;
   }
 
   pi.on("session_start", async (_event, ctx) => {
     await heartbeat("waiting", ctx as PiContext);
-    timer = setInterval(() => void heartbeat(currentState, ctx as PiContext), HEARTBEAT_INTERVAL_MS);
+    timer = setInterval(() => {
+      void heartbeat(currentState, ctx as PiContext).catch((error) => {
+        if (timer) clearInterval(timer);
+        ctx.ui.notify(`Subagent heartbeat stopped: ${error instanceof Error ? error.message : String(error)}`, "error");
+      });
+    }, HEARTBEAT_INTERVAL_MS);
   });
   pi.on("agent_start", async (_event, ctx) => {
+    pendingMessages = undefined;
     attention = undefined;
     await heartbeat("running", ctx as PiContext);
   });
@@ -197,16 +205,27 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     attention = undefined;
     await heartbeat(currentState, ctx as PiContext);
   });
-  pi.on("agent_end", async (event, ctx) => {
-    let message: string | undefined;
+  pi.on("agent_end", (event) => {
+    pendingMessages = event.messages;
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!ctx.isIdle() || !pendingMessages) return;
+    const messages = pendingMessages;
+    pendingMessages = undefined;
+    const last = finalAssistantMessage(messages);
+    if (last?.stopReason === "error" || last?.stopReason === "aborted") {
+      await heartbeat("error", ctx, last.errorMessage || `Child run ${last.stopReason}`);
+      return;
+    }
     try {
       const resultPath = process.env.PI_SUBAGENT_RESULT_PATH;
-      const usage = resultPath ? await writeTurnResult(stateRoot, jobId, resultPath, (event as { messages?: MessageLike[] }).messages) : aggregateUsage((event as { messages?: MessageLike[] }).messages);
+      const usage = resultPath ? await writeTurnResult(stateRoot, jobId, resultPath, messages) : aggregateUsage(messages);
       if (usage) latestUsage = usage;
     } catch (error) {
-      message = `Could not write result: ${error instanceof Error ? error.message : String(error)}`;
+      await heartbeat("error", ctx, `Could not write result: ${error instanceof Error ? error.message : String(error)}`);
+      return;
     }
-    await heartbeat("waiting", ctx as PiContext, message);
+    if (ctx.isIdle()) await heartbeat("waiting", ctx);
   });
   pi.on("session_shutdown", async (_event, ctx) => {
     try {

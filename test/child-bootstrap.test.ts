@@ -1,13 +1,125 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, readdirSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import fs, { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { setImmediate as waitImmediate } from "node:timers/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import childBootstrap from "../src/child-bootstrap.js";
 
-test("child bootstrap writes final assistant text to latest and turn result paths on agent_end", async () => {
+test("child completion waits for settled and preserves errors and aborts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-settled-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  try {
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      const ctx = { cwd: root, isIdle: () => true };
+      const heartbeat = () => readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8").then(JSON.parse);
+      try {
+        await handlers.agent_start?.({}, ctx);
+        await handlers.agent_end?.({ messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }] }, ctx);
+        assert.equal((await heartbeat()).state, "running", "agent_end may be followed by automatic continuation");
+        await handlers.agent_settled?.({}, { ...ctx, isIdle: () => false });
+        assert.equal((await heartbeat()).state, "running", "another extension may start a continuation");
+        await handlers.agent_settled?.({}, ctx);
+        assert.equal((await heartbeat()).state, "waiting");
+        for (const stopReason of ["error", "aborted"]) {
+          await handlers.agent_start?.({}, ctx);
+          await handlers.agent_end?.({ messages: [{ role: "assistant", stopReason, errorMessage: "Interrupted", content: [] }] }, ctx);
+          await handlers.agent_settled?.({}, ctx);
+          const state = await heartbeat();
+          assert.equal(state.state, "error");
+          assert.match(state.message, /Interrupted/);
+          assert.equal(await readFile(resultPath, "utf8"), "done\n");
+        }
+      } finally {
+        await handlers.session_shutdown?.({}, ctx);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("periodic heartbeat write failures are reported without an unhandled rejection", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-heartbeat-error-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  let tick: (() => void) | undefined;
+  t.mock.method(globalThis, "setInterval", (callback: () => void) => { tick = callback; return undefined; });
+  const notices: string[] = [];
+  try {
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      const ctx = { cwd: root, ui: { notify(message: string) { notices.push(message); } } };
+      const path = join(root, "jobs", "child-1", "heartbeat.json");
+      try {
+        await handlers.session_start?.({}, ctx);
+        await rm(path);
+        await mkdir(path);
+        tick!();
+        for (let attempt = 0; attempt < 100 && !notices.length; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.match(notices.join("\n"), /Subagent heartbeat stopped:/);
+      } finally {
+        await rm(path, { recursive: true, force: true });
+        await handlers.session_shutdown?.({}, ctx);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("heartbeat publication keeps newer state after an overlapping timer write", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-heartbeat-order-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  let tick: (() => void) | undefined;
+  t.mock.method(globalThis, "setInterval", (callback: () => void) => { tick = callback; return undefined; });
+  try {
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      const ctx = { cwd: root, isIdle: () => true };
+      const heartbeatPath = join(root, "jobs", "child-1", "heartbeat.json");
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let reached!: () => void;
+      const entered = new Promise<void>((resolve) => { reached = resolve; });
+      let published!: () => void;
+      const oldPublished = new Promise<void>((resolve) => { published = resolve; });
+      const rename = fs.rename;
+      try {
+        await handlers.session_start?.({}, ctx);
+        let blockNext = true;
+        t.mock.method(fs, "rename", async (from: string, to: string) => {
+          if (to === heartbeatPath && blockNext) {
+            blockNext = false;
+            reached();
+            await held;
+            await rename(from, to);
+            published();
+          } else await rename(from, to);
+        });
+        syncBuiltinESMExports();
+        tick!();
+        await entered;
+        const starting = handlers.agent_start?.({}, ctx);
+        await Promise.race([starting, new Promise((resolve) => setTimeout(resolve, 30))]);
+        release();
+        await Promise.all([starting, oldPublished]);
+        assert.equal(JSON.parse(await readFile(heartbeatPath, "utf8")).state, "running");
+      } finally {
+        release();
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+        await handlers.session_shutdown?.({}, ctx);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("child bootstrap writes final assistant text to latest and turn result paths when settled", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-result-test-"));
   const resultPath = join(root, "jobs", "child-1", "result.md");
 
@@ -19,6 +131,7 @@ test("child bootstrap writes final assistant text to latest and turn result path
       { role: "assistant", content: [{ type: "thinking", thinking: "hidden" }, { type: "text", text: "LGTM" }] },
     ] } as any, { cwd: root });
 
+    await handlers.agent_settled?.({}, { cwd: root, isIdle: () => true });
     assert.equal(await readFile(resultPath, "utf8"), "LGTM\n");
     assert.equal(await readFile(join(root, "jobs", "child-1", "turns", "001-result.md"), "utf8"), "LGTM\n");
     assert.match(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"), /"state": "waiting"/);
@@ -39,6 +152,7 @@ test("child bootstrap records assistant usage on completed turns and heartbeats"
       { role: "assistant", content: [{ type: "text", text: "done again" }], usage: { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 600, cost: { input: 0.0015, output: 0.0015, cacheRead: 0, cacheWrite: 0, total: 0.003 } } },
     ] } as any, { cwd: root });
 
+    await handlers.agent_settled?.({}, { cwd: root, isIdle: () => true });
     const turns = JSON.parse(await readFile(join(root, "jobs", "child-1", "turns", "turns.json"), "utf8"));
     assert.equal(turns.turns[0].messagePreview, "done again");
     assert.deepEqual(turns.turns[0].usage, { input: 1500, output: 300, cacheRead: 300, cacheWrite: 40, totalTokens: 2140, cost: { input: 0.0045, output: 0.0045, cacheRead: 0.0003, cacheWrite: 0.00012, total: 0.00942 } });
@@ -63,9 +177,11 @@ test("child bootstrap records each completed turn and updates the latest result"
     await handlers.agent_end?.({ type: "agent_end", messages: [
       { role: "assistant", content: [{ type: "text", text: "first result" }] },
     ] } as any, { cwd: root });
+    await handlers.agent_settled?.({}, { cwd: root, isIdle: () => true });
     await handlers.agent_end?.({ type: "agent_end", messages: [
       { role: "assistant", content: [{ type: "text", text: "second result" }] },
     ] } as any, { cwd: root });
+    await handlers.agent_settled?.({}, { cwd: root, isIdle: () => true });
 
     assert.equal(await readFile(resultPath, "utf8"), "second result\n");
     assert.equal(await readFile(join(root, "jobs", "child-1", "turns", "001-result.md"), "utf8"), "first result\n");
@@ -145,6 +261,7 @@ test("child bootstrap never exposes partial control JSON during overlapping writ
         ...Array.from({ length: 12 }, () => handlers.agent_start?.({ type: "agent_start" } as any, { cwd: `${largeCwd}-running` })),
         ...Array.from({ length: 4 }, (_, index) => handlers.agent_end?.({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: `result ${index}` }] }] } as any, { cwd: `${largeCwd}-done` })),
       ]);
+      await handlers.agent_settled?.({}, { cwd: largeCwd, isIdle: () => true });
       watching.active = false;
       await Promise.all(readers);
 

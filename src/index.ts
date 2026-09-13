@@ -58,6 +58,7 @@ const PACKAGE_NAME = "pi-tmux-subagents";
 const activeJobs = new Map<string, SubagentStatusResult>();
 let setStatus: ((text: string | undefined) => void) | undefined;
 let setWidget: ((rows: SubagentViewRow[] | undefined) => void) | undefined;
+let notify: NonNullable<PiContext["ui"]>["notify"];
 let lastStatusText: string | undefined;
 let lastWidgetText: string | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
@@ -243,7 +244,7 @@ function trackStatus(status: SubagentStatusResult) {
   activeJobs.set(status.job.id, status);
   rememberCompletion(status);
   refreshParentStatus();
-  void refreshSummaryCacheFor(visibleStatuses());
+  void refreshSummaryCacheFor(visibleStatuses()).catch(reportRefreshError);
   if (pollRoot) startStatusPolling(pollRoot);
 }
 
@@ -258,9 +259,14 @@ function startStatusPolling(root: string) {
       stopStatusPolling();
       return;
     }
-    void refreshSubagentSnapshot(root, "parent");
+    void refreshSubagentSnapshot(root, "parent").catch(reportRefreshError);
   }, 3000);
   pollTimer.unref?.();
+}
+
+function reportRefreshError(error: unknown) {
+  stopStatusPolling();
+  notify?.(`Subagent background refresh stopped: ${error instanceof Error ? error.message : String(error)}`, "error");
 }
 
 function stopStatusPolling() {
@@ -431,7 +437,7 @@ function trackCleanupCompletions(cleanup: CleanupCompletedResult) {
   }
   if (cleanup.autoStopped.length) {
     refreshParentStatus();
-    void refreshSummaryCacheFor(visibleStatuses());
+    void refreshSummaryCacheFor(visibleStatuses()).catch(reportRefreshError);
   }
 }
 
@@ -543,7 +549,7 @@ export function parseSubagentsCommand(args: string): ParsedSubagentsCommand {
 type RefreshScope = "parent" | "manager";
 type SubagentSnapshot = { statuses: SubagentStatusResult[]; summaries: Map<string, SessionSummaryMetadata>; rows: SubagentViewRow[] };
 
-async function refreshSubagentSnapshot(root: string, scope: RefreshScope): Promise<SubagentSnapshot> {
+function refreshSubagentSnapshot(root: string, scope: RefreshScope): Promise<SubagentSnapshot> {
   const generation = refreshGeneration;
   const run = async (): Promise<SubagentSnapshot> => {
     const jobs = scope === "manager"
@@ -744,6 +750,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     const ui = (ctx as PiContext).ui;
+    notify = ui?.notify ? (message, level) => ui.notify?.(message, level) : undefined;
     setStatus = ui?.setStatus ? (text) => ui.setStatus?.(STATUS_KEY, text) : undefined;
     setWidget = ui?.setWidget ? (rows) => {
       if (!rows) {
@@ -767,6 +774,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     setWidget?.(undefined);
     setStatus = undefined;
     setWidget = undefined;
+    notify = undefined;
     requestWidgetRender = undefined;
     widgetRows = [];
     widgetSuppressionDepth = 0;

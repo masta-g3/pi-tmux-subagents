@@ -182,16 +182,21 @@ export async function getSubagentStatus(
   const heartbeat = await readHeartbeat(root, job.id);
   const turns = await readTurns(root, job.id);
   const latestTurn = turns?.turns.at(-1);
+  const usage = heartbeat?.usage ?? latestTurn?.usage;
+  if (usage !== undefined && ![usage?.input, usage?.output, usage?.cost?.total].every(Number.isFinite)) {
+    throw new Error(`Invalid usage for subagent ${job.id}`);
+  }
   const latestResult = latestTurn ? await readOptional(latestTurn.resultPath) : undefined;
   const result = latestResult ?? await readOptional(resultPath(root, job.id));
   const exists = await sessionExists(tmux, job.tmuxSession);
   const preview = exists ? await capturePane(tmux, job.tmuxSession) : undefined;
   const status = exists ? effectiveStatus(job, heartbeat) : "stopped";
-  if (status !== job.status) {
-    const updated = await updateJob(root, job.id, (existing) => ({ ...existing, status, updatedAt: Date.now() }));
-    await updateMirroredJobStatus(updated, status);
+  const error = status === "error" ? heartbeat?.message ?? job.error : job.error;
+  if (status !== job.status || error !== job.error) {
+    const updated = await updateJob(root, job.id, (existing) => ({ ...existing, status, error, updatedAt: Date.now() }));
+    await updateMirroredJobStatus(updated, status, status === "error" ? error : undefined);
   }
-  return { job: { ...job, status }, status, heartbeat, result, latestResult, latestTurn, preview, usage: heartbeat?.usage ?? latestTurn?.usage };
+  return { job: { ...job, status, error }, status, heartbeat, result, latestResult, latestTurn, preview, usage };
 }
 
 export async function sendSubagentMessage(
