@@ -76,10 +76,6 @@ export async function updateMirroredJobStatus(job: TmuxSubagentJob, status: stri
   });
 }
 
-export async function removeMirroredJob(job: TmuxSubagentJob): Promise<void> {
-  await removeMirroredJobs([job]);
-}
-
 export async function removeMirroredJobs(jobs: TmuxSubagentJob[]): Promise<void> {
   const hubDir = process.env.PI_AGENT_HUB_DIR;
   if (!hubDir || jobs.length === 0) return;

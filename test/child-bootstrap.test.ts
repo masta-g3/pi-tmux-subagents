@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, type PathLike } from "node:fs";
 import fs, { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { setImmediate as waitImmediate } from "node:timers/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import childBootstrap from "../src/child-bootstrap.js";
+import { getSubagentStatus } from "../src/run.js";
 
 test("child completion waits for settled and preserves errors and aborts", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-settled-test-"));
@@ -36,6 +37,364 @@ test("child completion waits for settled and preserves errors and aborts", async
       } finally {
         await handlers.session_shutdown?.({}, ctx);
       }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("new one-shot children close after successful publication and finalize on shutdown", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-one-shot-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: true, idleTimeoutMs: 900_000 });
+    await withChildEnv(root, resultPath, async () => {
+      const hubDir = join(root, "hub");
+      await mkdir(join(hubDir, "heartbeats"), { recursive: true });
+      await writeFile(join(hubDir, "registry.json"), JSON.stringify({ sessions: [{ id: "child-1" }] }), "utf8");
+      process.env.PI_AGENT_HUB_DIR = hubDir;
+      process.env.PI_AGENT_HUB_SESSION_ID = "child-1";
+      const handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const ctx = { cwd: root, isIdle: () => true, shutdown: () => { shutdowns += 1; }, ui: { notify() {} } };
+      await handlers.session_start?.({}, ctx);
+      await handlers.agent_start?.({}, ctx);
+      await handlers.agent_end?.({ messages: [{ role: "assistant", stopReason: "stop", content: "done" }] }, ctx);
+      await handlers.agent_settled?.({}, ctx);
+
+      assert.equal(shutdowns, 1);
+      const waiting = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+      assert.equal(waiting.state, "waiting");
+      assert.equal(typeof waiting.idleSince, "number");
+
+      await handlers.session_shutdown?.({}, ctx);
+      const registry = JSON.parse(await readFile(join(root, "jobs.json"), "utf8"));
+      assert.equal(registry.jobs[0].status, "stopped");
+      assert.equal(registry.jobs[0].autoStopped, true);
+      assert.equal(JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8")).state, "waiting", "automatic teardown must not publish shutdown");
+      assert.deepEqual(JSON.parse(await readFile(join(hubDir, "registry.json"), "utf8")).sessions, []);
+      await assert.rejects(readFile(join(hubDir, "heartbeats", "child-1.json"), "utf8"), { code: "ENOENT" });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("child lifetimes distinguish finite, indefinite, and legacy policies", async (t) => {
+  for (const [idleTimeoutMs, expectedShutdowns] of [[10, 1], [0, 0], [undefined, 0]] as const) {
+    const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-reusable-test-"));
+    const resultPath = join(root, "jobs", "child-1", "result.md");
+    let tick: (() => void) | undefined;
+    let now = 1_000;
+    t.mock.method(Date, "now", () => now);
+    t.mock.method(globalThis, "setInterval", (callback: () => void) => { tick = callback; return 1 as any; });
+    try {
+      await writeJobRegistry(root, { autoStopOnComplete: idleTimeoutMs === undefined, idleTimeoutMs });
+      await withChildEnv(root, resultPath, async () => {
+        const handlers = loadBootstrapHandlers();
+        let shutdowns = 0;
+        const ctx = { cwd: root, isIdle: () => true, shutdown: () => { shutdowns += 1; }, ui: { notify() {} } };
+        await handlers.session_start?.({}, ctx);
+        await handlers.agent_start?.({}, ctx);
+        await handlers.agent_end?.({ messages: [{ role: "assistant", content: "done" }] }, ctx);
+        await handlers.agent_settled?.({}, ctx);
+        assert.equal(shutdowns, 0);
+        now += 10;
+        await tick!();
+        assert.equal(shutdowns, expectedShutdowns);
+        await handlers.session_shutdown?.({}, ctx);
+      });
+    } finally {
+      t.mock.restoreAll();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("idle expiry protects active work, input and failures, then resets after success", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-protected-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  let now = 1_000;
+  let tick: (() => void) | undefined;
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "setInterval", (callback: () => void) => { tick = callback; return undefined; });
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: false, idleTimeoutMs: 100 });
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const ctx = { cwd: root, isIdle: () => true, shutdown() { shutdowns++; }, ui: { notify() {} } };
+      const succeed = async () => {
+        await handlers.agent_end?.({ messages: [{ role: "assistant", content: "done" }] }, ctx);
+        await handlers.agent_settled?.({}, ctx);
+      };
+      try {
+        await handlers.session_start?.({}, ctx);
+        now += 1_000;
+        await tick!();
+        assert.equal(shutdowns, 0, "startup idle has no successful run to expire");
+        await handlers.agent_start?.({}, ctx);
+        await succeed();
+        await handlers.tool_call?.({ toolName: "ask_question", toolCallId: "question", input: { question: "Proceed?" } }, ctx);
+        now += 100;
+        await tick!();
+        assert.equal(shutdowns, 0, "explicit input keeps an idle child open");
+        await handlers.tool_result?.({ toolCallId: "question" }, ctx);
+        await handlers.agent_start?.({}, ctx);
+        now += 1_000;
+        await tick!();
+        assert.equal(shutdowns, 0, "new work cancels the old idle deadline");
+        for (const stopReason of ["error", "aborted"]) {
+          await handlers.agent_start?.({}, ctx);
+          await handlers.agent_end?.({ messages: [{ role: "assistant", stopReason, errorMessage: "Interrupted", content: [] }] }, ctx);
+          await handlers.agent_settled?.({}, ctx);
+          now += 1_000;
+          await tick!();
+          assert.equal(shutdowns, 0, stopReason);
+        }
+        await handlers.agent_start?.({}, ctx);
+        process.env.PI_SUBAGENT_RESULT_PATH = root;
+        await succeed();
+        now += 1_000;
+        await tick!();
+        assert.equal(shutdowns, 0, "result-write failure must not expire");
+        process.env.PI_SUBAGENT_RESULT_PATH = resultPath;
+        await handlers.agent_start?.({}, ctx);
+        await succeed();
+        now += 99;
+        await tick!();
+        assert.equal(shutdowns, 0);
+        now++;
+        await tick!();
+        assert.equal(shutdowns, 1, "a later success starts a fresh full idle period");
+      } finally {
+        await handlers.session_shutdown?.({}, ctx);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic teardown reports finalization failure without claiming removal", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-finalize-error-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: true, idleTimeoutMs: 900_000 });
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const ctx = { cwd: root, isIdle: () => true, shutdown() { shutdowns++; }, ui: { notify() {} } };
+      await handlers.session_start?.({}, ctx);
+      await handlers.agent_start?.({}, ctx);
+      await handlers.agent_end?.({ messages: [{ role: "assistant", content: "saved result" }] }, ctx);
+      await handlers.agent_settled?.({}, ctx);
+      assert.equal(shutdowns, 1);
+      const rename = fs.rename;
+      t.mock.method(fs, "rename", async (from: PathLike, to: PathLike) => {
+        if (to === join(root, "jobs.json")) throw new Error("Registry write failed");
+        return rename(from, to);
+      });
+      syncBuiltinESMExports();
+      try {
+        await assert.rejects(handlers.session_shutdown?.({}, ctx), /Registry write failed/);
+        assert.equal(JSON.parse(await readFile(join(root, "jobs.json"), "utf8")).jobs[0].autoStopped, undefined);
+        assert.equal(await readFile(resultPath, "utf8"), "saved result\n");
+      } finally {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reload restores only a proven successful idle period", async (t) => {
+  for (const previous of [
+    { state: "waiting", idleSince: 1_000, seenRunning: true },
+    { state: "waiting", seenRunning: true },
+    { state: "error", idleSince: 1_000, seenRunning: true },
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-reload-test-"));
+    const resultPath = join(root, "jobs", "child-1", "result.md");
+    t.mock.method(Date, "now", () => 2_000);
+    try {
+      await writeJobRegistry(root, { autoStopOnComplete: false, idleTimeoutMs: 500 });
+      await mkdir(join(root, "jobs", "child-1"), { recursive: true });
+      await writeFile(join(root, "jobs", "child-1", "heartbeat.json"), JSON.stringify({ jobId: "child-1", cwd: root, stateSince: 1_000, updatedAt: 1_000, ...previous }), "utf8");
+      await withChildEnv(root, resultPath, async () => {
+        const handlers = loadBootstrapHandlers();
+        let shutdowns = 0;
+        const ctx = { cwd: root, isIdle: () => true, shutdown: () => { shutdowns += 1; }, ui: { notify() {} } };
+        await handlers.session_start?.({}, ctx);
+        assert.equal(shutdowns, previous.state === "waiting" && previous.idleSince !== undefined ? 1 : 0);
+        const heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+        assert.equal(heartbeat.idleSince, previous.state === "waiting" ? previous.idleSince : undefined);
+        await handlers.session_shutdown?.({}, ctx);
+      });
+    } finally {
+      t.mock.restoreAll();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a full child reload preserves its deadline despite a stopped observation", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-full-reload-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  let now = 1_000;
+  let tick: (() => void) | undefined;
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "setInterval", (callback: () => void) => { tick = callback; return undefined; });
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: false, idleTimeoutMs: 500 });
+    await withChildEnv(root, resultPath, async () => {
+      let handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const ctx = { cwd: root, isIdle: () => true, shutdown() { shutdowns++; }, ui: { notify() {} } };
+      try {
+        await handlers.session_start?.({}, ctx);
+        await handlers.agent_start?.({}, ctx);
+        await handlers.agent_end?.({ messages: [{ role: "assistant", content: "done" }] }, ctx);
+        await handlers.agent_settled?.({}, ctx);
+        now = 1_200;
+        await handlers.session_shutdown?.({ reason: "reload" }, ctx);
+        const observed = await getSubagentStatus(root, "child-1", async () => { throw new Error("Transient tmux query failure"); });
+        assert.equal(observed.job.status, "stopped");
+        assert.equal(observed.autoStopped, undefined);
+        handlers = loadBootstrapHandlers();
+        await handlers.session_start?.({ reason: "reload" }, ctx);
+        const heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+        assert.equal(heartbeat.idleSince, 1_000);
+        assert.equal(shutdowns, 0);
+        now = 1_500;
+        await tick!();
+        await waitFor(() => shutdowns === 1);
+      } finally {
+        await handlers.session_shutdown?.({}, ctx);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("missing launch records are reported rather than treated as legacy jobs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-missing-job-test-"));
+  try {
+    await withChildEnv(root, join(root, "result.md"), async () => {
+      await rm(join(root, "jobs.json"));
+      const handlers = loadBootstrapHandlers();
+      const ctx = { cwd: root, isIdle: () => true, shutdown() {}, ui: { notify() {} } };
+      try {
+        await assert.rejects(handlers.session_start?.({}, ctx), /Unknown job/);
+      } finally {
+        await handlers.session_shutdown?.({}, ctx);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("new work accepted during a descendant query cancels the stale close", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-race-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  const bin = join(root, "bin");
+  const entered = join(root, "tmux-entered");
+  const release = join(root, "tmux-release");
+  const savedPath = process.env.PATH;
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: true, idleTimeoutMs: 900_000 }, [{ id: "descendant", parentId: "child-1", tmuxSession: "descendant-session" }]);
+    await mkdir(bin);
+    const tmux = join(bin, "tmux");
+    await writeFile(tmux, `#!/bin/sh\ntouch '${entered}'\nwhile [ ! -f '${release}' ]; do sleep 0.01; done\nexit 0\n`, "utf8");
+    await fs.chmod(tmux, 0o755);
+    process.env.PATH = `${bin}:${savedPath ?? ""}`;
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const ctx = { cwd: root, isIdle: () => true, shutdown: () => { shutdowns += 1; }, ui: { notify() {} } };
+      await handlers.session_start?.({}, ctx);
+      await handlers.agent_start?.({}, ctx);
+      await handlers.agent_end?.({ messages: [{ role: "assistant", content: "done" }] }, ctx);
+      const settling = handlers.agent_settled?.({}, ctx);
+      await waitFor(() => readdirSync(root).includes("tmux-entered"));
+      await handlers.agent_start?.({}, ctx);
+      await writeFile(release, "", "utf8");
+      await settling;
+      assert.equal(shutdowns, 0);
+      assert.equal(JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8")).state, "running");
+      await handlers.session_shutdown?.({}, ctx);
+    });
+  } finally {
+    process.env.PATH = savedPath;
+    t.mock.restoreAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("descendant query errors retry and open descendants defer closure", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-descendants-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  const bin = join(root, "bin");
+  const mode = join(root, "tmux-mode");
+  const savedPath = process.env.PATH;
+  let tick: (() => void) | undefined;
+  t.mock.method(globalThis, "setInterval", (callback: () => void) => { tick = callback; return 1 as any; });
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: true, idleTimeoutMs: 900_000 }, [{ id: "descendant", parentId: "child-1", tmuxSession: "descendant-session" }]);
+    await mkdir(bin);
+    const tmux = join(bin, "tmux");
+    await writeFile(tmux, `#!/bin/sh\ncase "$(cat '${mode}')" in error) exit 1;; open) echo descendant-session;; esac\n`, "utf8");
+    await fs.chmod(tmux, 0o755);
+    await writeFile(mode, "error", "utf8");
+    process.env.PATH = `${bin}:${savedPath ?? ""}`;
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const notices: string[] = [];
+      const ctx = { cwd: root, isIdle: () => true, shutdown: () => { shutdowns += 1; }, ui: { notify(message: string) { notices.push(message); } } };
+      await handlers.session_start?.({}, ctx);
+      await handlers.agent_start?.({}, ctx);
+      await handlers.agent_end?.({ messages: [{ role: "assistant", content: "done" }] }, ctx);
+      await handlers.agent_settled?.({}, ctx);
+      assert.equal(shutdowns, 0);
+      assert.match(notices.join("\n"), /Could not check subagent descendants/);
+
+      await writeFile(mode, "open", "utf8");
+      await tick!();
+      assert.equal(shutdowns, 0);
+
+      await writeFile(mode, "clear", "utf8");
+      await tick!();
+      assert.equal(shutdowns, 1);
+      await handlers.session_shutdown?.({}, ctx);
+    });
+  } finally {
+    process.env.PATH = savedPath;
+    t.mock.restoreAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy policy-less children and failed runs never close automatically", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-legacy-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: true });
+    await withChildEnv(root, resultPath, async () => {
+      const handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const ctx = { cwd: root, isIdle: () => true, shutdown: () => { shutdowns += 1; }, ui: { notify() {} } };
+      await handlers.session_start?.({}, ctx);
+      await handlers.agent_start?.({}, ctx);
+      await handlers.agent_end?.({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "failed" }] }, ctx);
+      await handlers.agent_settled?.({}, ctx);
+      assert.equal(shutdowns, 0);
+      assert.equal(JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8")).idleSince, undefined);
+      await handlers.session_shutdown?.({}, ctx);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -308,6 +667,35 @@ test("child bootstrap mirrors heartbeats to pi-agent-hub when configured", async
   });
 });
 
+async function writeJobRegistry(
+  root: string,
+  policy: { autoStopOnComplete: boolean; idleTimeoutMs?: number },
+  extraJobs: Array<{ id: string; parentId: string; tmuxSession: string }> = [],
+): Promise<void> {
+  await mkdir(root, { recursive: true });
+  const base = {
+    agentName: "worker",
+    taskPreview: "test",
+    cwd: root,
+    status: "running",
+    resultPath: join(root, "jobs", "child-1", "result.md"),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await writeFile(join(root, "jobs.json"), `${JSON.stringify({ version: 1, jobs: [
+    { ...base, id: "child-1", tmuxSession: "pi-subagent-child-1", ...policy },
+    ...extraJobs.map((job) => ({ ...base, ...job })),
+  ] }, null, 2)}\n`, "utf8");
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.fail("timed out waiting for condition");
+}
+
 function loadBootstrapHandlers(): Record<string, Function> {
   const handlers: Record<string, Function> = {};
   childBootstrap({
@@ -339,6 +727,7 @@ async function withChildEnv(root: string, resultPath: string, fn: () => Promise<
   process.env.PI_TMUX_SUBAGENTS_JOB_ID = "child-1";
   process.env.PI_TMUX_SUBAGENTS_DIR = root;
   process.env.PI_SUBAGENT_RESULT_PATH = resultPath;
+  if (!existsSync(join(root, "jobs.json"))) await writeJobRegistry(root, { autoStopOnComplete: true });
   try {
     await fn();
   } finally {

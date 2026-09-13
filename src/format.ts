@@ -61,6 +61,7 @@ function displayName(status: SubagentStatusResult): string {
 }
 
 function presentationFor(status: SubagentStatusResult): { glyph: string; label: string; title: string } {
+  if (status.autoStopped) return STATUS_PRESENTATION.waiting;
   if (status.heartbeat?.attention && status.status !== "stopped" && status.status !== "error") return { glyph: "✸", label: "needs input", title: "Needs input" };
   return status.status === "waiting" && status.job.autoStopOnComplete === false
     ? { glyph: "✓", label: "idle", title: "Ready" }
@@ -188,7 +189,7 @@ export function formatAgentStatus(status: SubagentStatusResult): string {
     lines.push(`   read: ${path}`);
     lines.push(`   next: read({ path: ${JSON.stringify(path)}, limit: 2000 })`);
   }
-  if (status.status === "waiting" && status.job.autoStopOnComplete === false) {
+  if (status.status === "waiting" && status.job.autoStopOnComplete === false && !status.job.idleTimeoutMs) {
     lines.push("   cleanup: persistent child is idle; stop when done");
     lines.push(`   stop: tmux_subagent({ action: "stop", childId: "${status.job.id}" })`);
   }
@@ -224,11 +225,8 @@ export function formatStatus(status: SubagentStatusResult): string {
   );
   if (status.autoStopped) {
     lines.push("   auto-stopped after completion");
-    if (status.mirrorCleanupError) lines.push(`   pi-agent-hub cleanup failed: ${status.mirrorCleanupError}`);
   } else {
-    if (status.autoStopError) lines.push(`   auto-stop failed: ${status.autoStopError}`);
     lines.push(`   stop: tmux_subagent({ action: "stop", childId: "${status.job.id}" })`);
   }
-  if (status.hygieneNote) lines.push(`   cleanup: ${status.hygieneNote}`);
   return lines.join("\n");
 }

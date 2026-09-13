@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { heartbeatPath, turnResultPath, turnsPath } from "./paths.js";
-import type { TmuxSubagentAttention, TmuxSubagentHeartbeat, TmuxSubagentTurnsRegistry, TmuxSubagentUsage } from "./types.js";
+import { hasOpenDescendants, finalizeStoppedSubagents } from "./run.js";
+import { resolveJob } from "./state.js";
+import type { TmuxSubagentAttention, TmuxSubagentHeartbeat, TmuxSubagentJob, TmuxSubagentTurnsRegistry, TmuxSubagentUsage } from "./types.js";
 
-type PiContext = { cwd: string };
+type PiContext = Pick<ExtensionContext, "cwd" | "isIdle" | "shutdown" | "ui">;
 type MessageLike = { role?: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: Partial<TmuxSubagentUsage> & { cost?: Partial<TmuxSubagentUsage["cost"]> } };
 
 const EXTENSION_KEY = Symbol.for("pi-tmux-subagents.child-bootstrap.loaded");
@@ -141,6 +143,28 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
   let heartbeatQueue: Promise<void> = Promise.resolve();
   let pendingMessages: MessageLike[] | undefined;
   let currentMessage: string | undefined;
+  let idleSince: number | undefined;
+  let lifetimeJob: TmuxSubagentJob | undefined;
+  let closing = false;
+
+  async function maybeClose(ctx: PiContext): Promise<void> {
+    if (closing || !lifetimeJob || lifetimeJob.autoStopped || lifetimeJob.idleTimeoutMs === undefined || currentState !== "waiting" || idleSince === undefined || attention || !ctx.isIdle()) return;
+    const capturedIdleSince = idleSince;
+    const eligible = lifetimeJob.autoStopOnComplete !== false
+      || (lifetimeJob.idleTimeoutMs > 0 && Date.now() - capturedIdleSince >= lifetimeJob.idleTimeoutMs);
+    if (!eligible) return;
+
+    let descendantsOpen: boolean;
+    try {
+      descendantsOpen = await hasOpenDescendants(stateRoot, jobId);
+    } catch (error) {
+      ctx.ui.notify(`Could not check subagent descendants: ${error instanceof Error ? error.message : String(error)}`, "error");
+      return;
+    }
+    if (descendantsOpen || closing || currentState !== "waiting" || idleSince !== capturedIdleSince || attention || !ctx.isIdle()) return;
+    closing = true;
+    ctx.shutdown();
+  }
 
   function heartbeat(state: TmuxSubagentHeartbeat["state"], ctx: PiContext, message?: string): Promise<void> {
     if (state !== currentState || message !== undefined) currentMessage = message;
@@ -160,6 +184,7 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
       seenRunning,
       usage: latestUsage,
       attention,
+      idleSince,
     };
     const publish = async () => {
       await writeJson(heartbeatPath(stateRoot, jobId), data);
@@ -180,18 +205,43 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     return heartbeatQueue;
   }
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
+    lifetimeJob = await resolveJob(stateRoot, jobId);
+    if (lifetimeJob.idleTimeoutMs !== undefined && !lifetimeJob.autoStopped) {
+      try {
+        const previous = JSON.parse(await readFile(heartbeatPath(stateRoot, jobId), "utf8")) as TmuxSubagentHeartbeat;
+        const wasIdle = previous.state === "waiting" || (event.reason === "reload" && previous.state === "shutdown");
+        if (wasIdle && typeof previous.idleSince === "number" && Number.isFinite(previous.idleSince)) {
+          idleSince = previous.idleSince;
+          seenRunning = true;
+          latestUsage = previous.usage;
+          attention = previous.attention;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     await heartbeat("waiting", ctx as PiContext);
-    timer = setInterval(() => {
-      void heartbeat(currentState, ctx as PiContext).catch((error) => {
+    timer = setInterval(async () => {
+      try {
+        await heartbeat(currentState, ctx);
+      } catch (error) {
         if (timer) clearInterval(timer);
         ctx.ui.notify(`Subagent heartbeat stopped: ${error instanceof Error ? error.message : String(error)}`, "error");
-      });
+        return;
+      }
+      try {
+        await maybeClose(ctx);
+      } catch (error) {
+        ctx.ui.notify(`Could not shut down idle subagent: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
     }, HEARTBEAT_INTERVAL_MS);
+    await maybeClose(ctx as PiContext);
   });
   pi.on("agent_start", async (_event, ctx) => {
     pendingMessages = undefined;
     attention = undefined;
+    idleSince = undefined;
     await heartbeat("running", ctx as PiContext);
   });
   pi.on("tool_call", async (event, ctx) => {
@@ -214,6 +264,7 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     pendingMessages = undefined;
     const last = finalAssistantMessage(messages);
     if (last?.stopReason === "error" || last?.stopReason === "aborted") {
+      idleSince = undefined;
       await heartbeat("error", ctx, last.errorMessage || `Child run ${last.stopReason}`);
       return;
     }
@@ -222,15 +273,26 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
       const usage = resultPath ? await writeTurnResult(stateRoot, jobId, resultPath, messages) : aggregateUsage(messages);
       if (usage) latestUsage = usage;
     } catch (error) {
+      idleSince = undefined;
       await heartbeat("error", ctx, `Could not write result: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    if (ctx.isIdle()) await heartbeat("waiting", ctx);
+    if (ctx.isIdle()) {
+      idleSince = Date.now();
+      await heartbeat("waiting", ctx);
+      await maybeClose(ctx);
+    }
   });
   pi.on("session_shutdown", async (_event, ctx) => {
     try {
       if (timer) clearInterval(timer);
-      await heartbeat("shutdown", ctx as PiContext);
+      timer = undefined;
+      if (closing) {
+        await heartbeatQueue;
+        await finalizeStoppedSubagents(stateRoot, [lifetimeJob!], true);
+      } else {
+        await heartbeat("shutdown", ctx as PiContext);
+      }
     } finally {
       delete globalState[EXTENSION_KEY];
     }

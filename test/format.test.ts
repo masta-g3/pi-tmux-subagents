@@ -68,7 +68,6 @@ test("formatUserStatus renders lean active card without operational commands or 
       updatedAt: Date.now(),
       usage: { input: 18_200, output: 1_400, cacheRead: 0, cacheWrite: 0, totalTokens: 19_600, cost: { input: 0.05, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.08 } },
     },
-    hygieneNote: "1 idle persistent child needs stop when no longer needed.",
   }));
 
   assert.match(output, /^tmux subagent scout-auth \(scout\)\n ⟳ running · 2m39s · activity 0s ago · 1\.4k out · \$0\.08/m);
@@ -105,14 +104,14 @@ test("formatAgentStatus adds model-visible result read hints", () => {
   assert.match(output, /   next: read\(\{ path: "\/tmp\/jobs\/child-123\/turns\/001-result\.md", limit: 2000 \}\)/);
 });
 
-test("formatAgentStatus reminds idle persistent children to stop", () => {
-  const output = formatAgentStatus(status({
-    latestTurn: { index: 1, status: "waiting", startedAt: 100_000, completedAt: 160_000, resultPath: "/tmp/jobs/child-123/turns/001-result.md" },
-    job: { ...status().job, autoStopOnComplete: false },
-  }));
-
-  assert.match(output, /   cleanup: persistent child is idle; stop when done/);
-  assert.match(output, /   stop: tmux_subagent\(\{ action: "stop", childId: "child-123" \}\)/);
+test("formatAgentStatus only reminds indefinite idle children to stop", () => {
+  for (const idleTimeoutMs of [undefined, 0, 900_000]) {
+    const output = formatAgentStatus(status({
+      job: { ...status().job, autoStopOnComplete: false, idleTimeoutMs },
+    }));
+    if (idleTimeoutMs) assert.doesNotMatch(output, /cleanup:|   stop:/);
+    else assert.match(output, /   stop: tmux_subagent\(\{ action: "stop", childId: "child-123" \}\)/);
+  }
 });
 
 test("formatSubagentFooterStatus and widget render live observability summary", () => {
@@ -141,17 +140,12 @@ test("formatStatus shows auto-stopped completion without manual stop hint", () =
   assert.doesNotMatch(output, /tmux_subagent\({ action: "stop"/);
 });
 
-test("formatStatus shows auto-stop failure with manual stop hint", () => {
-  const output = formatStatus(status({ autoStopError: "tmux session disappeared" }));
-
-  assert.match(output, /   auto-stop failed: tmux session disappeared/);
-  assert.match(output, /   stop: tmux_subagent\({ action: "stop", childId: "child-123" }\)/);
-});
-
-test("formatStatus shows subagent hygiene notes", () => {
-  const output = formatStatus(status({ hygieneNote: "2 idle persistent children need stop when no longer needed." }));
-
-  assert.match(output, /   cleanup: 2 idle persistent children need stop when no longer needed\./);
+test("formatAgentStatus renders child-owned automatic stops as done with result access", () => {
+  const output = formatAgentStatus(status({ status: "stopped", autoStopped: true }));
+  assert.match(output, /✓ done/);
+  assert.match(output, /result ready/);
+  assert.match(output, /next: read\(/);
+  assert.doesNotMatch(output, /   stop:/);
 });
 
 test("formatStatus prefers result and truncates long snippets", () => {

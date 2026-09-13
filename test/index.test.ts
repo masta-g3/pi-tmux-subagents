@@ -169,7 +169,7 @@ test("tmux_subagent retains auto-stopped completions briefly and then clears", a
   mkdirSync(join(state, "jobs", id), { recursive: true });
   writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
     version: 1,
-    jobs: [{ id, agentName: "scout", displayName: "scout-retained", taskPreview: "Finish retained child", cwd: root, tmuxSession, status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: 90_000, updatedAt: 90_000, autoStopOnComplete: true }],
+    jobs: [{ id, agentName: "scout", displayName: "scout-retained", taskPreview: "Finish retained child", cwd: root, tmuxSession, status: "stopped", resultPath: join(state, "jobs", id, "result.md"), createdAt: 90_000, updatedAt: 99_000, autoStopOnComplete: true, idleTimeoutMs: 900_000, autoStopped: true }],
   }, null, 2)}\n`);
   writeFileSync(join(state, "jobs", id, "heartbeat.json"), `${JSON.stringify({ jobId: id, cwd: root, state: "waiting", stateSince: 99_000, updatedAt: 99_000, seenRunning: true }, null, 2)}\n`);
   writeFileSync(join(state, "jobs", id, "result.md"), "Done\n");
@@ -189,7 +189,10 @@ test("tmux_subagent retains auto-stopped completions briefly and then clears", a
     await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
 
     assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-retained/);
-    t.mock.timers.tick(10_001);
+    t.mock.timers.tick(9_000);
+    const repeated = await tool.execute("again", { action: "status", childId: id }, undefined, undefined, { cwd: root });
+    assert.equal(repeated.details.autoStopped, true);
+    t.mock.timers.tick(1_001);
     assert.equal(widgets.at(-1)?.[1], undefined);
   } finally {
     await handlersShutdown(handlers);
@@ -249,7 +252,7 @@ test("tmux_subagent summary widget expires stale summaries while idle", async (t
   }
 });
 
-test("tmux_subagent status reads jobs from canonical default root and sweeps missing sessions", async () => {
+test("tmux_subagent status reads jobs from canonical default root and observes missing sessions", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-root-test-"));
   const agentDir = join(root, "agent");
   const state = join(agentDir, "pi-tmux-subagents");
@@ -267,6 +270,7 @@ test("tmux_subagent status reads jobs from canonical default root and sweeps mis
     const result = await tool.execute("call", { action: "status" }, undefined, undefined, { cwd: root });
 
     assert.match(result.content[0].text, /child-1 stopped scout-auth: Inspect/);
+    assert.equal(result.details.jobs[0].status, "stopped");
   } finally {
     restorePiEnv();
   }
@@ -274,6 +278,8 @@ test("tmux_subagent status reads jobs from canonical default root and sweeps mis
 
 test("tmux_subagent global status hides old stopped jobs unless requested", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-status-filter-test-"));
+  const errorSession = `pi-tmux-history-error-${process.pid}`;
+  createTmuxSession(errorSession);
   const agentDir = join(root, "agent");
   const state = join(agentDir, "pi-tmux-subagents");
   mkdirSync(state, { recursive: true });
@@ -292,7 +298,7 @@ test("tmux_subagent global status hides old stopped jobs unless requested", asyn
     version: 1,
     jobs: [
       ...stoppedJobs,
-      { id: "error-1", agentName: "scout", taskPreview: "Needs review", cwd: root, tmuxSession: "pi-agent-hub-error-1", status: "error", resultPath: join(state, "jobs", "error-1", "result.md"), createdAt: 20, updatedAt: 20 },
+      { id: "error-1", agentName: "scout", taskPreview: "Needs review", cwd: root, tmuxSession: errorSession, status: "error", resultPath: join(state, "jobs", "error-1", "result.md"), createdAt: 20, updatedAt: 20 },
     ],
   }, null, 2)}\n`);
 
@@ -314,6 +320,7 @@ test("tmux_subagent global status hides old stopped jobs unless requested", asyn
     assert.doesNotMatch(full.content[0].text, /older stopped child hidden/);
     assert.equal(full.details.jobs.length, 8);
   } finally {
+    killTmuxSession(errorSession);
     restorePiEnv();
   }
 });
@@ -630,7 +637,7 @@ test("open manager refreshes live metadata in place and disposes its timer", asy
   }
 });
 
-test("manager observation applies auto-stop before rendering completion", async () => {
+test("manager observes completion without stopping the child", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-manager-autostop-test-"));
   const agentDir = join(root, "agent");
   const state = join(agentDir, "pi-tmux-subagents");
@@ -660,8 +667,10 @@ test("manager observation applies auto-stop before rendering completion", async 
 
     assert.match(rendered, /Done  1/);
     assert.match(rendered, /scout-complete/);
-    assert.doesNotMatch(rendered, /s stop|a attach/);
-    assert.throws(() => execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" }));
+    execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" });
+    const saved = JSON.parse(readFileSync(join(state, "jobs.json"), "utf8")).jobs[0];
+    assert.equal(saved.status, "waiting");
+    assert.equal(saved.autoStopped, undefined);
   } finally {
     killTmuxSession(tmuxSession);
     restorePiEnv();
@@ -742,6 +751,77 @@ test("npm install does not self-disable for filtered or non-local packages", () 
   assert.equal(shouldSkipNpmPackageForLocalDev({ currentRoot: localRoot, settingsFiles: [settingsPath] }), false);
 });
 
+test("parent polling observes finite idle lifetimes without closing children", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-idle-observe-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const jobDir = join(state, "jobs", "idle-child");
+  const tmuxSession = `pi-tmux-idle-observe-${process.pid}`;
+  const restore = isolatePiStateEnv(agentDir);
+  const handlers = new Map<string, Function>();
+  let tool: any;
+  let polls = 0;
+  t.mock.method(globalThis, "setInterval", () => { polls++; return { unref() {} }; });
+  try {
+    mkdirSync(jobDir, { recursive: true });
+    createTmuxSession(tmuxSession);
+    extension({ on(name: string, handler: Function) { handlers.set(name, handler); }, registerTool(value: any) { tool = value; } } as any);
+    for (const [policy, heartbeatState, expectedStatus, expectedPolls] of [
+      [{ autoStopOnComplete: false, idleTimeoutMs: 900_000 }, "waiting", "waiting", 1],
+      [{ autoStopOnComplete: false, idleTimeoutMs: 900_000 }, "shutdown", "waiting", 1],
+      [{ autoStopOnComplete: true, idleTimeoutMs: 0 }, "shutdown", "waiting", 1],
+      [{ autoStopOnComplete: false, idleTimeoutMs: 0 }, "waiting", "waiting", 0],
+      [{ autoStopOnComplete: false }, "waiting", "waiting", 0],
+      [{ autoStopOnComplete: false }, "shutdown", "stopped", 0],
+    ] as const) {
+      polls = 0;
+      const now = Date.now();
+      const job = { id: "idle-child", agentName: "scout", taskPreview: "Done", cwd: root, tmuxSession, status: "waiting", resultPath: join(jobDir, "result.md"), createdAt: now, updatedAt: now, ...policy };
+      writeFileSync(join(state, "jobs.json"), JSON.stringify({ version: 1, jobs: [job] }));
+      writeFileSync(join(jobDir, "heartbeat.json"), JSON.stringify({ state: heartbeatState, seenRunning: true, updatedAt: now }));
+      await handlers.get("session_start")?.({}, { cwd: root });
+      const result = await tool.execute("status", { action: "status", childId: job.id });
+      assert.equal(result.details.status, expectedStatus);
+      assert.equal(polls, expectedPolls);
+      execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" });
+      await handlersShutdown(handlers);
+    }
+  } finally {
+    await handlersShutdown(handlers);
+    killTmuxSession(tmuxSession);
+    restore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("status and list calls leave existing completed children open", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-no-sweep-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const tmuxSession = `pi-tmux-no-sweep-${process.pid}`;
+  const restore = isolatePiStateEnv(agentDir);
+  const handlers = new Map<string, Function>();
+  try {
+    mkdirSync(join(state, "jobs", "legacy-child"), { recursive: true });
+    const job = { id: "legacy-child", agentName: "scout", taskPreview: "Done", cwd: root, tmuxSession, status: "waiting", resultPath: join(state, "jobs", "legacy-child", "result.md"), createdAt: 1, updatedAt: 2, autoStopOnComplete: true };
+    writeFileSync(join(state, "jobs.json"), JSON.stringify({ version: 1, jobs: [job] }));
+    writeFileSync(join(state, "jobs", job.id, "heartbeat.json"), JSON.stringify({ state: "waiting", seenRunning: true, updatedAt: 2 }));
+    createTmuxSession(tmuxSession);
+    let tool: any;
+    extension({ on(name: string, handler: Function) { handlers.set(name, handler); }, registerTool(value: any) { tool = value; } } as any);
+    for (const params of [{ action: "status" }, { action: "list" }, { action: "status", childId: job.id }]) {
+      await tool.execute("observe", params);
+      execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" });
+      assert.equal(JSON.parse(readFileSync(join(state, "jobs.json"), "utf8")).jobs[0].autoStopped, undefined);
+    }
+  } finally {
+    await handlersShutdown(handlers);
+    killTmuxSession(tmuxSession);
+    restore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("tmux_subagent exposes persistent send and wait actions", () => {
   let tool: any;
   extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
@@ -761,7 +841,7 @@ test("tmux_subagent exposes persistent send and wait actions", () => {
   assert.match(tool.parameters.properties.childId.description, /omit to return when any active child completes/);
 });
 
-test("tmux_subagent launch applies one-shot model override", async () => {
+test("tmux_subagent launch applies model and lifetime overrides", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-model-test-"));
   const agentDir = join(root, "agent");
   const binDir = join(root, "bin");
@@ -783,9 +863,11 @@ test("tmux_subagent launch applies one-shot model override", async () => {
       registerTool(def: any) { tool = def; },
       on(name: string, handler: Function) { handlers.set(name, handler); },
     } as any);
-    const result = await tool.execute("call", { agent: "scout", task: "Inspect auth", model: " openai-codex/gpt-5.6-sol ", background: true }, undefined, undefined, { cwd: root });
+    const result = await tool.execute("call", { agent: "scout", task: "Inspect auth", model: " openai-codex/gpt-5.6-sol ", background: true, autoStopOnComplete: false, idleTimeoutMs: 1234 }, undefined, undefined, { cwd: root });
 
     assert.equal(result.details.model, "openai-codex/gpt-5.6-sol");
+    assert.equal(result.details.idleTimeoutMs, 1234);
+    assert.equal(result.details.autoStopOnComplete, false);
     assert.match(readFileSync(logPath, "utf8"), /'--model' 'openai-codex\/gpt-5\.6-sol:medium'/);
   } finally {
     await handlersShutdown(handlers);
@@ -813,6 +895,9 @@ test("tmux_subagent exposes runtime auto-stop option enabled by default", () => 
 
   assert.equal(tool.parameters.properties.autoStopOnComplete.type, "boolean");
   assert.equal(tool.parameters.properties.autoStopOnComplete.default, true);
+  assert.equal(tool.parameters.properties.idleTimeoutMs.type, "integer");
+  assert.equal(tool.parameters.properties.idleTimeoutMs.default, 900_000);
+  assert.equal(tool.parameters.properties.idleTimeoutMs.minimum, 0);
   assert.match(tool.parameters.properties.autoStopOnComplete.description, /Default true/);
   assert.equal(resolveAutoStopOnComplete(undefined), true);
   assert.equal(resolveAutoStopOnComplete(true), true);

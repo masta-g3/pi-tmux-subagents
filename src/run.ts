@@ -3,13 +3,15 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
-import { detectAgentHubMirror, mirroredTmuxSessionName, mirrorJobToAgentHub, removeMirroredJob, removeMirroredJobs, updateMirroredJobStatus } from "./pi-agent-hub-adapter.js";
+import { detectAgentHubMirror, mirroredTmuxSessionName, mirrorJobToAgentHub, removeMirroredJobs, updateMirroredJobStatus } from "./pi-agent-hub-adapter.js";
 import { boundedSystemPromptAppend, buildPiArgs, taskPreview, writePromptFiles } from "./prompt.js";
 import { SYSTEM_PROMPT_APPEND_ENV, TMUX_SESSION_PREFIX } from "./names.js";
 import { heartbeatPath, metadataPath, resultPath, stateRoot as defaultStateRoot, turnsPath } from "./paths.js";
 import { loadJobs, resolveJob, updateJob, updateJobs, upsertJob } from "./state.js";
 import { capturePane, execTmux, killSession, newTmuxSession, sendMessage, sessionExists, type TmuxExecutor } from "./tmux.js";
 import type { AgentConfig, SubagentStatusResult, TmuxSubagentHeartbeat, TmuxSubagentJob, TmuxSubagentStatus, TmuxSubagentTurnsRegistry } from "./types.js";
+
+export const DEFAULT_IDLE_TIMEOUT_MS = 900_000;
 
 export interface LaunchSubagentInput {
   stateRoot?: string;
@@ -19,6 +21,7 @@ export interface LaunchSubagentInput {
   background: boolean;
   displayName?: string;
   autoStopOnComplete?: boolean;
+  idleTimeoutMs?: number;
   allowNestedSubagents?: boolean;
   nestedAgentAllowlist?: string[];
   maxNestedDepth?: number;
@@ -38,16 +41,6 @@ export interface WaitAnyOptions extends Omit<WaitOptions, "afterTurnIndex"> {
   jobFilter?: (job: TmuxSubagentJob) => boolean;
 }
 
-export interface CleanupCompletedOptions {
-  jobFilter?: (job: TmuxSubagentJob) => boolean;
-}
-
-export interface CleanupCompletedResult {
-  autoStopped: SubagentStatusResult[];
-  idlePersistent: SubagentStatusResult[];
-  errors: Array<{ job: TmuxSubagentJob; error: string }>;
-}
-
 function childBootstrapPath(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "child-bootstrap.js");
 }
@@ -58,7 +51,8 @@ function piCommand(): string {
 
 function effectiveStatus(job: TmuxSubagentJob, heartbeat?: TmuxSubagentHeartbeat): TmuxSubagentStatus {
   if (!heartbeat) return job.status;
-  if (heartbeat.state === "shutdown") return "stopped";
+  // A live child may be reloading, not exiting. Keep legacy observations unchanged.
+  if (heartbeat.state === "shutdown") return job.idleTimeoutMs === undefined ? "stopped" : job.status;
   if (heartbeat.state === "error") return "error";
   if (heartbeat.state === "running") return "running";
   if (heartbeat.state === "waiting") return heartbeat.seenRunning ? "waiting" : "running";
@@ -95,6 +89,10 @@ async function readTurns(root: string, id: string): Promise<TmuxSubagentTurnsReg
 }
 
 export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSubagentJob> {
+  const idleTimeoutMs = input.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0) {
+    throw new Error("idleTimeoutMs must be a finite nonnegative safe integer");
+  }
   const root = input.stateRoot ?? defaultStateRoot();
   const tmux = input.tmux ?? execTmux;
   const now = Date.now();
@@ -115,6 +113,7 @@ export async function launchSubagent(input: LaunchSubagentInput): Promise<TmuxSu
     createdAt: now,
     updatedAt: now,
     autoStopOnComplete: input.autoStopOnComplete,
+    idleTimeoutMs,
     allowNestedSubagents: input.allowNestedSubagents || undefined,
     nestedAgentAllowlist: input.allowNestedSubagents ? input.nestedAgentAllowlist ?? [] : undefined,
     maxNestedDepth: input.allowNestedSubagents ? input.maxNestedDepth ?? 2 : undefined,
@@ -188,15 +187,24 @@ export async function getSubagentStatus(
   }
   const latestResult = latestTurn ? await readOptional(latestTurn.resultPath) : undefined;
   const result = latestResult ?? await readOptional(resultPath(root, job.id));
-  const exists = await sessionExists(tmux, job.tmuxSession);
+  const exists = job.autoStopped ? false : await sessionExists(tmux, job.tmuxSession);
   const preview = exists ? await capturePane(tmux, job.tmuxSession) : undefined;
-  const status = exists ? effectiveStatus(job, heartbeat) : "stopped";
-  const error = status === "error" ? heartbeat?.message ?? job.error : job.error;
-  if (status !== job.status || error !== job.error) {
-    const updated = await updateJob(root, job.id, (existing) => ({ ...existing, status, error, updatedAt: Date.now() }));
-    await updateMirroredJobStatus(updated, status, status === "error" ? error : undefined);
+  const observedStatus = job.autoStopped ? "stopped" : exists ? effectiveStatus(job, heartbeat) : "stopped";
+  const observedError = observedStatus === "error" ? heartbeat?.message ?? job.error : job.error;
+  let current: TmuxSubagentJob = { ...job, status: observedStatus, error: observedError };
+  if (observedStatus !== job.status || observedError !== job.error) {
+    current = await updateJob(root, job.id, (existing) => {
+      if (existing.autoStopped) return existing;
+      return { ...existing, status: observedStatus, error: observedError, updatedAt: Date.now() };
+    });
+    if (!current.autoStopped) {
+      await updateMirroredJobStatus(current, current.status, current.status === "error" ? current.error : undefined);
+    }
+  } else {
+    current = await resolveJob(root, job.id);
   }
-  return { job: { ...job, status, error }, status, heartbeat, result, latestResult, latestTurn, preview, usage };
+  const status = current.autoStopped ? "stopped" : current.status;
+  return { job: current, status, heartbeat, result, latestResult, latestTurn, preview, usage, autoStopped: current.autoStopped || undefined };
 }
 
 export async function sendSubagentMessage(
@@ -244,21 +252,32 @@ export async function cancelSubagent(
     if (await sessionExists(tmux, job.tmuxSession)) await killSession(tmux, job.tmuxSession);
   }
 
-  const stoppedAt = Date.now();
-  let stoppedTarget: TmuxSubagentJob | undefined;
+  const stopped = await finalizeStoppedSubagents(root, jobs);
+  return stopped.find((job) => job.id === target.id)!;
+}
+
+export async function finalizeStoppedSubagents(
+  root: string,
+  jobs: TmuxSubagentJob[],
+  autoStopped = false,
+): Promise<TmuxSubagentJob[]> {
+  if (jobs.length === 0) return [];
   const ids = new Set(jobs.map((job) => job.id));
+  const stoppedAt = Date.now();
   const updatedRegistry = await updateJobs(root, (latest) => ({
     ...latest,
     jobs: latest.jobs.map((job) => {
       if (!ids.has(job.id)) return job;
-      const stopped = { ...job, status: "stopped" as const, updatedAt: stoppedAt };
-      if (job.id === target.id) stoppedTarget = stopped;
-      return stopped;
+      const nextAutoStopped = job.autoStopped || autoStopped || undefined;
+      if (job.status === "stopped" && job.autoStopped === nextAutoStopped) return job;
+      return { ...job, status: "stopped" as const, autoStopped: nextAutoStopped, updatedAt: stoppedAt };
     }),
   }));
-  stoppedTarget ??= updatedRegistry.jobs.find((job) => job.id === target.id);
-  await removeMirroredJobs(jobs);
-  return stoppedTarget!;
+  const stopped = jobs
+    .map((job) => updatedRegistry.jobs.find((candidate) => candidate.id === job.id))
+    .filter((job): job is TmuxSubagentJob => job !== undefined);
+  await removeMirroredJobs(stopped);
+  return stopped;
 }
 
 function jobSubtree(jobs: TmuxSubagentJob[], rootId: string): TmuxSubagentJob[] {
@@ -278,25 +297,16 @@ function jobSubtree(jobs: TmuxSubagentJob[], rootId: string): TmuxSubagentJob[] 
   return subtree;
 }
 
-export async function autoStopCompletedSubagent(
+export async function hasOpenDescendants(
   root: string,
-  status: SubagentStatusResult,
+  id: string,
   tmux: TmuxExecutor = execTmux,
-): Promise<SubagentStatusResult> {
-  if (status.status !== "waiting") return status;
-  let stopped: TmuxSubagentJob;
-  try {
-    stopped = await cancelSubagent(root, status.job.id, tmux);
-  } catch (error) {
-    return { ...status, autoStopError: error instanceof Error ? error.message : String(error) };
-  }
-
-  try {
-    await removeMirroredJob(stopped);
-  } catch (error) {
-    return { ...status, job: stopped, autoStopped: true, mirrorCleanupError: error instanceof Error ? error.message : String(error) };
-  }
-  return { ...status, job: stopped, autoStopped: true };
+): Promise<boolean> {
+  const descendants = jobSubtree((await loadJobs(root)).jobs, id).slice(1);
+  if (descendants.length === 0) return false;
+  const { stdout } = await tmux(["list-sessions", "-F", "#{session_name}"]);
+  const openNames = new Set(stdout.split(/\r?\n/).filter(Boolean));
+  return descendants.some((job) => openNames.has(job.tmuxSession));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -324,34 +334,6 @@ export async function waitForSubagent(
     if (status.status === "waiting" && turnComplete) return status;
     await sleep(intervalMs);
   }
-}
-
-export async function cleanupCompletedSubagents(
-  root: string,
-  tmux: TmuxExecutor = execTmux,
-  options: CleanupCompletedOptions = {},
-): Promise<CleanupCompletedResult> {
-  const result: CleanupCompletedResult = { autoStopped: [], idlePersistent: [], errors: [] };
-  const candidates = (await loadJobs(root)).jobs
-    .filter((job) => options.jobFilter?.(job) ?? true)
-    .filter((job) => job.status !== "stopped" && job.status !== "error");
-
-  for (const job of candidates) {
-    try {
-      const status = await getSubagentStatus(root, job.id, tmux);
-      if (status.status !== "waiting") continue;
-      if (status.job.autoStopOnComplete === false) result.idlePersistent.push(status);
-      else {
-        const stopped = await autoStopCompletedSubagent(root, status, tmux);
-        if (stopped.autoStopped) result.autoStopped.push(stopped);
-        else result.errors.push({ job, error: stopped.autoStopError ?? stopped.mirrorCleanupError ?? "auto-stop did not complete" });
-      }
-    } catch (error) {
-      result.errors.push({ job, error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  return result;
 }
 
 export async function waitForAnySubagent(

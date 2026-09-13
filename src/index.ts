@@ -7,7 +7,7 @@ import { formatAgentStatus } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
-import { autoStopCompletedSubagent, cancelSubagent, cleanupCompletedSubagents, getSubagentStatus, launchSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent, type CleanupCompletedResult } from "./run.js";
+import { DEFAULT_IDLE_TIMEOUT_MS, cancelSubagent, getSubagentStatus, launchSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent } from "./run.js";
 import { isFreshSessionSummary, readSessionSummaries, SESSION_SUMMARY_STALE_MS, type SessionSummaryMetadata } from "./session-summary.js";
 import { loadJobs } from "./state.js";
 import { createSubagentsLibraryView, formatAgentLibraryList } from "./subagents-library-view.js";
@@ -32,6 +32,7 @@ type ToolParams = {
   agentScope?: AgentScope;
   cwd?: string;
   autoStopOnComplete?: boolean;
+  idleTimeoutMs?: number;
   allowNestedSubagents?: boolean;
   nestedAgentAllowlist?: string[];
   maxNestedDepth?: number;
@@ -82,7 +83,7 @@ function visibleStatuses(now = Date.now()): SubagentStatusResult[] {
   pruneCompletionRetentions(now);
   const statuses = [...activeJobs.values()].filter((status) => {
     if (status.status === "starting" || status.status === "running" || status.status === "error") return true;
-    return status.status === "waiting" && status.job.autoStopOnComplete === false;
+    return status.status === "waiting" && (status.job.autoStopOnComplete === false || status.job.idleTimeoutMs !== undefined);
   });
   const visibleIds = new Set(statuses.map((status) => status.job.id));
   for (const [id, retained] of retainedCompletions) {
@@ -92,7 +93,10 @@ function visibleStatuses(now = Date.now()): SubagentStatusResult[] {
 }
 
 function hasActiveStatuses(): boolean {
-  return visibleStatuses().some((status) => status.status === "starting" || status.status === "running");
+  return visibleStatuses().some(({ status, job }) =>
+    status === "starting" || status === "running" ||
+    (status === "waiting" && job.idleTimeoutMs !== undefined && (job.autoStopOnComplete !== false || job.idleTimeoutMs > 0)),
+  );
 }
 
 function visibleStatusIds(statuses: SubagentStatusResult[]): string[] {
@@ -132,7 +136,7 @@ function scheduleCompletionRetentionClear(now = Date.now()) {
 }
 
 function rememberCompletion(status: SubagentStatusResult, now = Date.now()) {
-  if (!status.autoStopped) return;
+  if (!status.autoStopped || activeJobs.get(status.job.id)?.autoStopped) return;
   retainedCompletions.set(status.job.id, { status, expiresAt: now + COMPLETION_RETENTION_MS });
   scheduleCompletionRetentionClear(now);
 }
@@ -241,8 +245,8 @@ async function refreshSummaryCacheFor(statuses: SubagentStatusResult[]) {
 }
 
 function trackStatus(status: SubagentStatusResult) {
-  activeJobs.set(status.job.id, status);
   rememberCompletion(status);
+  activeJobs.set(status.job.id, status);
   refreshParentStatus();
   void refreshSummaryCacheFor(visibleStatuses()).catch(reportRefreshError);
   if (pollRoot) startStatusPolling(pollRoot);
@@ -362,9 +366,8 @@ function shouldSkipCurrentNpmPackageForLocalDev(): boolean {
   return shouldSkipNpmPackageForLocalDev({ currentRoot: packageRoot(), settingsFiles: settingsPaths() });
 }
 
-function formatJobsStatus(jobs: TmuxSubagentJob[], includeStopped: boolean): string {
-  const { jobs: selected, hiddenStopped } = selectStatusJobs(jobs, includeStopped);
-  const lines = selected.map(formatJobSummary);
+function formatJobsStatus(jobs: TmuxSubagentJob[], hiddenStopped: number): string {
+  const lines = jobs.map(formatJobSummary);
   if (hiddenStopped > 0) lines.push(`${hiddenStopped} older stopped child${hiddenStopped === 1 ? "" : "ren"} hidden; pass includeStopped: true for full history.`);
   return lines.join("\n") || "No tmux subagent jobs.";
 }
@@ -379,7 +382,7 @@ function statusWarningText(warnings: StatusWarning[]): string | undefined {
 async function readGlobalStatuses(root: string, jobs: TmuxSubagentJob[]): Promise<{ statuses: SubagentStatusResult[]; warnings: StatusWarning[] }> {
   const warnings: StatusWarning[] = [];
   const statuses = await Promise.all(jobs.map(async (job): Promise<SubagentStatusResult> => {
-    if (job.status === "stopped") return { job, status: "stopped" };
+    if (job.status === "stopped") return { job, status: "stopped", autoStopped: job.autoStopped };
     try {
       return await getSubagentStatus(root, job.id);
     } catch (error) {
@@ -406,7 +409,8 @@ const TmuxSubagentParams = {
     id: { type: "string", description: "Alias for childId." },
     agentScope: { type: "string", enum: ["user", "project", "both"], description: "Agent discovery scope. Default user." },
     cwd: { type: "string", description: "Working directory for the child. Defaults to parent cwd." },
-    autoStopOnComplete: { type: "boolean", default: true, description: "Stop the tmux session automatically after a clean completion. Default true; set false to keep sessions alive for follow-up. Failures and attention-needed sessions stay alive." },
+    autoStopOnComplete: { type: "boolean", default: true, description: "Default true. Child closes itself after successful completion. Set false for reusable sessions, which expire after idleTimeoutMs. Running, failed, input-waiting children and parents with open workers stay alive." },
+    idleTimeoutMs: { type: "integer", minimum: 0, default: DEFAULT_IDLE_TIMEOUT_MS, description: "For reusable children, close after this many idle milliseconds following successful completion. Default 900000 (15 minutes); 0 explicitly keeps the child open indefinitely. Does not delay one-shot completion." },
     allowNestedSubagents: { type: "boolean", default: false, description: "Expose tmux_subagent inside the child for explicitly approved nested specialist agents. Default false." },
     nestedAgentAllowlist: { type: "array", items: { type: "string" }, description: "Agent names the child may launch when allowNestedSubagents is true." },
     maxNestedDepth: { type: "number", default: 2, description: "Maximum PI_SUBAGENT_DEPTH allowed for launched nested tmux_subagents. Default 2." },
@@ -416,43 +420,6 @@ const TmuxSubagentParams = {
 
 function text(content: string, details?: unknown, isError?: boolean) {
   return { content: [{ type: "text" as const, text: content }], details, isError };
-}
-
-type ToolTextResult = ReturnType<typeof text>;
-
-function cleanupNote(cleanup: CleanupCompletedResult): string | undefined {
-  const notes = [
-    cleanup.autoStopped.length ? `auto-stopped ${cleanup.autoStopped.length} completed child${cleanup.autoStopped.length === 1 ? "" : "ren"}` : undefined,
-    cleanup.idlePersistent.length ? `${cleanup.idlePersistent.length} idle persistent child${cleanup.idlePersistent.length === 1 ? " needs" : "ren need"} stop when no longer needed` : undefined,
-    cleanup.errors.length ? `${cleanup.errors.length} cleanup error${cleanup.errors.length === 1 ? "" : "s"}` : undefined,
-  ].filter(Boolean);
-  return notes.length ? `${notes.join("; ")}.` : undefined;
-}
-
-function trackCleanupCompletions(cleanup: CleanupCompletedResult) {
-  for (const status of cleanup.autoStopped) {
-    if (!activeJobs.has(status.job.id)) continue;
-    activeJobs.set(status.job.id, status);
-    rememberCompletion(status);
-  }
-  if (cleanup.autoStopped.length) {
-    refreshParentStatus();
-    void refreshSummaryCacheFor(visibleStatuses()).catch(reportRefreshError);
-  }
-}
-
-function withCleanupNote(result: ToolTextResult, cleanup: CleanupCompletedResult): ToolTextResult {
-  const note = cleanupNote(cleanup);
-  if (!note) return result;
-  if (typeof result.details === "object" && result.details !== null) {
-    const details = { ...result.details, hygieneNote: note };
-    return isStatusResult(details) ? text(formatAgentStatus(details), details, result.isError) : text(result.content[0]?.text ?? "", details, result.isError);
-  }
-  return text(result.content[0]?.text ?? "", { details: result.details, hygieneNote: note }, result.isError);
-}
-
-function isStatusResult(value: unknown): value is SubagentStatusResult {
-  return typeof value === "object" && value !== null && "job" in value && "status" in value;
 }
 
 function statusResultPath(status: SubagentStatusResult): string | undefined {
@@ -556,19 +523,15 @@ function refreshSubagentSnapshot(root: string, scope: RefreshScope): Promise<Sub
       ? selectStatusJobs((await loadJobs(root)).jobs, false).jobs
       : [...activeJobs.values()].map((status) => status.job);
     const ids = [...new Set(jobs.map((job) => job.id))];
-    const refreshed = await Promise.all(ids.map(async (id) => {
-      const status = await getSubagentStatus(root, id).catch(() => undefined);
-      if (!status) return undefined;
-      return status.job.autoStopOnComplete ? autoStopCompletedSubagent(root, status) : status;
-    }));
+    const refreshed = await Promise.all(ids.map((id) => getSubagentStatus(root, id).catch(() => undefined)));
     const statuses = refreshed.filter((status): status is SubagentStatusResult => Boolean(status));
     const summaries = await readSessionSummaries(statuses.map((status) => status.job.id)).catch(() => new Map<string, SessionSummaryMetadata>());
     const rows = toSubagentViewRows(statuses, { summaries });
 
     if (generation === refreshGeneration) {
       for (const status of statuses) {
-        activeJobs.set(status.job.id, status);
         rememberCompletion(status);
+        activeJobs.set(status.job.id, status);
       }
       summaryCache = summaries;
       scheduleSummaryExpiryRefresh();
@@ -817,14 +780,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
       const nestedPolicy = nestedSessionPolicy();
       const inNestedSession = nestedPolicy.depth > 0;
       const requestedId = params.childId ?? params.id;
-      const cleanup = await cleanupCompletedSubagents(root, undefined, {
-        jobFilter: (job) => {
-          if (inNestedSession && !nestedCanAccessJob(job, nestedPolicy.childId)) return false;
-          return requestedId ? !job.id.startsWith(requestedId) : true;
-        },
-      });
-      trackCleanupCompletions(cleanup);
-      const reply = (content: string, details?: unknown, isError?: boolean) => withCleanupNote(text(content, details, isError), cleanup);
+      const reply = text;
 
       if (params.action === "list") {
         if (inNestedSession && !nestedPolicy.allowlist.length) return reply(nestedDisabledMessage(), undefined, true);
@@ -868,12 +824,12 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           const visibleJobs = inNestedSession ? jobs.jobs.filter((job) => nestedCanAccessJob(job, nestedPolicy.childId)) : jobs.jobs;
           const selected = selectStatusJobs(visibleJobs, params.includeStopped ?? false);
           const { statuses, warnings: statusWarnings } = await readGlobalStatuses(root, selected.jobs);
-          const content = [formatJobsStatus(visibleJobs, params.includeStopped ?? false), statusWarningText(statusWarnings)].filter(Boolean).join("\n");
-          return reply(content, { ...jobs, jobs: selected.jobs, statuses, hiddenStopped: selected.hiddenStopped, statusWarnings });
+          const currentJobs = statuses.map(({ job }) => job);
+          const content = [formatJobsStatus(currentJobs, selected.hiddenStopped), statusWarningText(statusWarnings)].filter(Boolean).join("\n");
+          return reply(content, { ...jobs, jobs: currentJobs, statuses, hiddenStopped: selected.hiddenStopped, statusWarnings });
         }
-        const initialStatus = await getSubagentStatus(root, id);
-        if (inNestedSession && !nestedCanAccessJob(initialStatus.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
-        const status = initialStatus.job.autoStopOnComplete ? await autoStopCompletedSubagent(root, initialStatus) : initialStatus;
+        const status = await getSubagentStatus(root, id);
+        if (inNestedSession && !nestedCanAccessJob(status.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
         trackStatus(status);
         return reply(formatAgentStatus(status), status);
       }
@@ -956,6 +912,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         task: params.task,
         background: params.background ?? false,
         autoStopOnComplete,
+        idleTimeoutMs: params.idleTimeoutMs,
         allowNestedSubagents: params.allowNestedSubagents && !nestedLaunch,
         nestedAgentAllowlist: params.nestedAgentAllowlist,
         maxNestedDepth: params.maxNestedDepth,
@@ -969,14 +926,13 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         ].join("\n"), job);
       }
 
-      const waited = await waitForSubagent(root, job.id, undefined, {
+      const final = await waitForSubagent(root, job.id, undefined, {
         signal,
         onUpdate: onUpdate ? (status) => {
           trackStatus(status);
           onUpdate(text(formatAgentStatus(status), status));
         } : undefined,
       });
-      const final = autoStopOnComplete ? await autoStopCompletedSubagent(root, waited) : waited;
       trackStatus(final);
       return reply(formatAgentStatus(final), final, final.status === "error");
     },

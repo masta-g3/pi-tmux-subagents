@@ -77,7 +77,8 @@ tmux_subagent({ action: "get", agent: "scout" })
 tmux_subagent({ agent: "scout", task: "Inspect auth flow", label: "scout-auth", background: true })
 tmux_subagent({ agent: "scout", task: "Inspect auth flow", model: "openai-codex/gpt-5.6-sol" }) // one-launch model override
 tmux_subagent({ agent: "code-critic", task: "Review these files", label: "code-critic-api" }) // auto-stops after clean completion by default
-tmux_subagent({ agent: "scout", task: "Keep alive for follow-up", autoStopOnComplete: false })
+tmux_subagent({ agent: "scout", task: "Inspect auth and await follow-up", autoStopOnComplete: false }) // 15-minute idle expiry
+tmux_subagent({ agent: "scout", task: "Keep open until stopped", autoStopOnComplete: false, idleTimeoutMs: 0 })
 tmux_subagent({ agent: "worker", task: "Review with approved specialists", allowNestedSubagents: true, nestedAgentAllowlist: ["code-critic", "plan-critic"] })
 tmux_subagent({ action: "send", childId: "abc123", message: "Now check edge cases.", wait: true })
 tmux_subagent({ action: "wait", childId: "abc123", timeoutMs: 600000 }) // only when blocked
@@ -88,7 +89,21 @@ tmux_subagent({ action: "status", childId: "abc123" })
 tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 ```
 
-Child sessions auto-stop after successful completion by default. Completion waits until automatic retries, compaction, and queued follow-ups finish. Failed or aborted runs, and failures to save results, stay alive for inspection. A later `status` call or parent UI poll stops completed background jobs. Pass `autoStopOnComplete: false` to inspect, attach, or send follow-up messages after completion, then use `action: "stop"` when done.
+New children close themselves without a parent status query, even if the parent exits or reloads. Completion waits until automatic retries, compaction, and queued follow-ups finish and results are saved.
+
+| Launch options | Lifetime after successful completion |
+| --- | --- |
+| Default | Close automatically |
+| `autoStopOnComplete: false` | Stay open for follow-up; close after 15 continuously idle minutes |
+| `autoStopOnComplete: false, idleTimeoutMs: 0` | Stay open until explicitly stopped |
+
+Set a positive integer `idleTimeoutMs` at launch to change the reusable child's idle window in milliseconds. It does not delay one-shot closure. New work cancels the idle deadline; the next successful completion starts a fresh window. Child reload preserves the deadline.
+
+Running and input-waiting children stay open. Failed or aborted runs and result-write failures also keep a child open. A finished child also stays open while any nested worker session remains open. Automatic closure never stops those workers. Explicit `action: "stop"` cascades through the child's descendants.
+
+Successful closure removes the child's Agent Hub row and heartbeat but keeps its result files. If teardown reports a file or permission error, Pi may exit while stale records remain. Resolve the error, then use `action: "stop"` with the child ID to retry cleanup.
+
+Existing jobs do not acquire this lifetime policy, even after a child reload. Stop them explicitly when no longer needed.
 
 Persistent children support generic follow-up turns through `action: "send"`. By default `send` returns after pasting the message into the live child; pass `wait: true` to wait for the next completed turn. Multiline messages are bracket-pasted with newlines preserved, then submitted once. When a child invokes Pi's explicit `ask_question` flow, the heartbeat carries first-class attention metadata so `send` can answer that running child without treating all busy children as replyable.
 
@@ -96,15 +111,13 @@ Prefer not to block on asynchronous/background subagents. Launch them, do useful
 
 Use `label` when launching multiple similar agents so dashboards and status output stay distinguishable. Prefer short labels prefixed with the agent type, such as `worker-auth`, `worker-billing`, `scout-api`, or `code-critic-plan`. Labels are display names only; `agent` still selects the underlying agent definition.
 
-Every `tmux_subagent` call also performs a lightweight cleanup sweep: completed children with auto-stop enabled are stopped, while persistent idle children are kept in structured details as reminders for agents to stop them when no longer needed.
-
 Unfiltered `action: "status"` is intentionally compact: it shows active/error jobs plus the 5 most recently stopped jobs, then reports how many older stopped jobs are hidden. Pass `includeStopped: true` to inspect the full historical list. If a live child cannot be refreshed, global status still returns the saved state and a warning.
 
 `Subagent background refresh stopped` means automatic parent polling has stopped. Resolve the reported error, then use `/subagents refresh` to retry. A child reporting `Subagent heartbeat stopped` is no longer publishing periodic status; treat its displayed status as potentially stale until the file error is resolved and the child is relaunched.
 
 The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact, width-aware below-editor widget for active, errored, persistent-idle, attention-needed, or briefly retained completed children. Questions and errors sort first and receive semantic color; routine states stay neutral. Fresh Agent Hub `session-metadata/<child-id>.json` can provide compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`), with turn/result/task text as fallback. Ages continue updating even after active polling stops. The extension still never generates summaries, calls a model, scrapes panes, or persists raw prompts/output for summaries. Open the live interactive manager with `/subagents`, `/subagents view`, `alt+s`, or `ctrl+alt+s`; use `/subagents library` to browse available Markdown agents read-only.
 
-Each successfully settled child run captures its final assistant message into a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling. This control-plane capture is handled by the child bootstrap and does not require the agent to have project file write access. Terminal tool results keep the rendered card compact, but the model-visible text includes the absolute result path plus a ready-to-use `read({ path, limit: 2000 })` hint; idle persistent children also include a `stop` reminder.
+Each successfully settled child run captures its final assistant message into a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling. This control-plane capture is handled by the child bootstrap and does not require the agent to have project file write access. Terminal tool results keep the rendered card compact, but the model-visible text includes the absolute result path plus a ready-to-use `read({ path, limit: 2000 })` hint; idle children with indefinite or legacy lifetime policies also include a `stop` reminder.
 
 Nested tmux subagents are disabled by default. Set `allowNestedSubagents: true` plus `nestedAgentAllowlist` to expose `tmux_subagent` inside the child for explicitly requested specialist agents; nested children do not receive nested-launch permission by default. Use `maxNestedDepth` to cap allowed child launch depth. The interactive manager keeps parent lineage available in selected-row details when the job has a `parentId`; full tree rendering is intentionally deferred so attention and errors remain top-level scannable.
 

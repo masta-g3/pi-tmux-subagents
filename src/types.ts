@@ -57,6 +57,8 @@ export interface TmuxSubagentJob {
   updatedAt: number;
   error?: string;
   autoStopOnComplete?: boolean;
+  idleTimeoutMs?: number;
+  autoStopped?: boolean;
   allowNestedSubagents?: boolean;
   nestedAgentAllowlist?: string[];
   maxNestedDepth?: number;
@@ -82,6 +84,7 @@ export interface TmuxSubagentHeartbeat {
   message?: string;
   updatedAt: number;
   seenRunning?: boolean;
+  idleSince?: number;
   usage?: TmuxSubagentUsage;
   attention?: TmuxSubagentAttention;
 }
@@ -110,8 +113,5 @@ export interface SubagentStatusResult {
   latestTurn?: TmuxSubagentTurn;
   preview?: string;
   autoStopped?: boolean;
-  autoStopError?: string;
-  mirrorCleanupError?: string;
   usage?: TmuxSubagentUsage;
-  hygieneNote?: string;
 }
