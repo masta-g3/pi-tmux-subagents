@@ -23,7 +23,7 @@ export function renderToolCall(args: { action?: string; agent?: string }, theme:
 
 export function renderToolResult(result: { content?: Array<{ type?: string; text?: string }>; details?: unknown }, _options: unknown, theme: ThemeLike): Text {
   if (isStatusResult(result.details)) return renderStatus(result.details, theme);
-  if (isStatusListResult(result.details)) return renderStatusList(result.details.statuses, result.details.hiddenStopped ?? 0, theme);
+  if (isStatusListResult(result.details)) return renderStatusList(result.details.statuses, result.details.hiddenStopped ?? 0, theme, result.details.pagination);
   return new Text(result.content?.filter((item) => item.type === "text").map((item) => item.text ?? "").join("\n") ?? "", 0, 0);
 }
 
@@ -37,15 +37,16 @@ function isStatusResult(value: unknown): value is SubagentStatusResult {
   return typeof value === "object" && value !== null && "job" in value && "status" in value;
 }
 
-function isStatusListResult(value: unknown): value is { statuses: SubagentStatusResult[]; hiddenStopped?: number } {
+function isStatusListResult(value: unknown): value is { statuses: SubagentStatusResult[]; hiddenStopped?: number; pagination?: string } {
   return typeof value === "object" && value !== null && Array.isArray((value as { statuses?: unknown }).statuses);
 }
 
-function renderStatusList(statuses: SubagentStatusResult[], hiddenStopped: number, theme: ThemeLike): Text {
+function renderStatusList(statuses: SubagentStatusResult[], hiddenStopped: number, theme: ThemeLike, pagination?: string): Text {
   const lines = formatUserStatusList(statuses, hiddenStopped).split("\n").map((line, index) => {
     if (index === 0 || index === 1) return theme.fg("muted", line);
     return colorStatusListLine(line, theme);
   });
+  if (pagination) lines.push(theme.fg("muted", pagination));
   return new Text(lines.join("\n"), 0, 0);
 }
 

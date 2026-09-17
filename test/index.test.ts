@@ -361,9 +361,31 @@ test("tmux_subagent full-history status does not hydrate stopped jobs through tm
     const result = await tool.execute("call", { action: "status", includeStopped: true }, undefined, undefined, { cwd: root });
 
     assert.match(result.content[0].text, /stopped-200 stopped scout: Historical job 200/);
-    assert.match(result.content[0].text, /stopped-001 stopped scout: Historical job 1/);
-    assert.equal(result.details.statuses.length, 200);
+    assert.doesNotMatch(result.content[0].text, /stopped-001 stopped scout: Historical job 1/);
+    assert.equal(result.details.statuses.length, 20);
+    assert.match(result.content[0].text, /offset: 20/);
+    const next = await tool.execute("call", { action: "status", includeStopped: true, offset: 20, limit: 10000 }, undefined, undefined, { cwd: root });
+    assert.equal(next.details.statuses.length, 50);
+    assert.equal(next.details.jobs[0].id, "stopped-180");
+    const last = await tool.execute("call", { action: "status", includeStopped: true, offset: 195 }, undefined, undefined, { cwd: root });
+    assert.equal(last.details.statuses.length, 5);
+    assert.match(last.content[0].text, /stopped-001 stopped scout: Historical job 1/);
+    assert.doesNotMatch(last.content[0].text, /Next page/);
     assert.equal(existsSync(logPath), false);
+
+    const waitingJobs = Array.from({ length: 5000 }, (_, index) => ({
+      ...jobs[0], id: `waiting-${index}`, status: "waiting", updatedAt: index + 1,
+      taskPreview: "Long\n".repeat(1000),
+    }));
+    writeFileSync(join(state, "jobs.json"), JSON.stringify({ version: 1, jobs: [
+      ...waitingJobs, { ...jobs[0], id: "running-old", status: "running", updatedAt: 0 },
+    ] }));
+    const active = await tool.execute("call", { action: "status" }, undefined, undefined, { cwd: root });
+    assert.equal(active.details.statuses.length, 20);
+    assert.equal(active.details.jobs[0].id, "running-old");
+    assert.equal(active.details.total, 5001);
+    assert.ok(active.content[0].text.length < 6000);
+    assert.equal(active.content[0].text.split("\n").length, 22);
   } finally {
     restorePiEnv();
     if (oldPath === undefined) delete process.env.PATH;

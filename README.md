@@ -84,7 +84,7 @@ tmux_subagent({ action: "send", childId: "abc123", message: "Now check edge case
 tmux_subagent({ action: "wait", childId: "abc123", timeoutMs: 600000 }) // only when blocked
 tmux_subagent({ action: "wait", timeoutMs: 600000 }) // wait for any active child to complete
 tmux_subagent({ action: "status" }) // active/error jobs plus recent stopped jobs
-tmux_subagent({ action: "status", includeStopped: true }) // full historical list
+tmux_subagent({ action: "status", includeStopped: true }) // first history page (20 jobs)
 tmux_subagent({ action: "status", childId: "abc123" })
 tmux_subagent({ action: "stop", childId: "abc123" }) // or action: "cancel"
 ```
@@ -111,7 +111,7 @@ Prefer not to block on asynchronous/background subagents. Launch them, do useful
 
 Use `label` when launching multiple similar agents so dashboards and status output stay distinguishable. Prefer short labels prefixed with the agent type, such as `worker-auth`, `worker-billing`, `scout-api`, or `code-critic-plan`. Labels are display names only; `agent` still selects the underlying agent definition.
 
-Unfiltered `action: "status"` is intentionally compact: it shows active/error jobs plus the 5 most recently stopped jobs, then reports how many older stopped jobs are hidden. Pass `includeStopped: true` to inspect the full historical list. If a live child cannot be refreshed, global status still returns the saved state and a warning.
+Global `action: "status"` returns at most 20 jobs by default (`limit`: 1–50), prioritizing saved running/starting states, then waiting, error, and stopped states. Default selection includes only the 5 most recently stopped jobs; `includeStopped: true` makes all history eligible without bypassing the page cap. Use the returned `offset` hint to continue. Pages reflect current registry order, not a frozen snapshot. Only displayed jobs are refreshed, so saved states outside the page may be stale. If a live child cannot be refreshed, global status still returns the saved state and a warning. A `childId` lookup remains unchanged.
 
 `Subagent background refresh stopped` means automatic parent polling has stopped. Resolve the reported error, then use `/subagents refresh` to retry. A child reporting `Subagent heartbeat stopped` is no longer publishing periodic status; treat its displayed status as potentially stale until the file error is resolved and the child is relaunched.
 

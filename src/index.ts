@@ -27,6 +27,8 @@ type ToolParams = {
   timeoutMs?: number;
   background?: boolean;
   includeStopped?: boolean;
+  limit?: number;
+  offset?: number;
   childId?: string;
   id?: string;
   agentScope?: AgentScope;
@@ -297,17 +299,18 @@ function compareRecentJobs(a: TmuxSubagentJob, b: TmuxSubagentJob): number {
 }
 
 function formatJobSummary(job: TmuxSubagentJob): string {
-  return `${job.id.slice(0, 12)} ${job.status} ${jobDisplayName(job)}: ${job.taskPreview}`;
+  return `${job.id.slice(0, 12)} ${job.status} ${jobDisplayName(job).replace(/\s+/g, " ").slice(0, 80)}: ${job.taskPreview.replace(/\s+/g, " ").slice(0, 160)}`;
 }
 
 function selectStatusJobs(jobs: TmuxSubagentJob[], includeStopped: boolean): { jobs: TmuxSubagentJob[]; hiddenStopped: number } {
-  const sorted = [...jobs].sort(compareRecentJobs);
+  const priority = { starting: 0, running: 0, waiting: 1, error: 2, stopped: 3 };
+  const sorted = [...jobs].sort((a, b) => priority[a.status] - priority[b.status] || compareRecentJobs(a, b));
   if (includeStopped) return { jobs: sorted, hiddenStopped: 0 };
 
   const active = sorted.filter((job) => job.status !== "stopped");
   const stopped = sorted.filter((job) => job.status === "stopped");
   const recentStopped = stopped.slice(0, RECENT_STOPPED_STATUS_LIMIT);
-  return { jobs: [...active, ...recentStopped].sort(compareRecentJobs), hiddenStopped: stopped.length - recentStopped.length };
+  return { jobs: [...active, ...recentStopped], hiddenStopped: stopped.length - recentStopped.length };
 }
 
 type PackageSettingsEntry = string | { source?: string; extensions?: unknown[] };
@@ -368,7 +371,7 @@ function shouldSkipCurrentNpmPackageForLocalDev(): boolean {
 
 function formatJobsStatus(jobs: TmuxSubagentJob[], hiddenStopped: number): string {
   const lines = jobs.map(formatJobSummary);
-  if (hiddenStopped > 0) lines.push(`${hiddenStopped} older stopped child${hiddenStopped === 1 ? "" : "ren"} hidden; pass includeStopped: true for full history.`);
+  if (hiddenStopped > 0) lines.push(`${hiddenStopped} older stopped child${hiddenStopped === 1 ? "" : "ren"} hidden; pass includeStopped: true to page through history.`);
   return lines.join("\n") || "No tmux subagent jobs.";
 }
 
@@ -404,7 +407,9 @@ const TmuxSubagentParams = {
     wait: { type: "boolean", description: "For action=send, wait for the next completed turn before returning. Prefer false unless blocked. Default false." },
     timeoutMs: { type: "number", description: "Optional timeout for action=send with wait=true or action=wait; wait leaves children alive on timeout." },
     background: { type: "boolean", description: "Return immediately after spawning the tmux child. Default false." },
-    includeStopped: { type: "boolean", default: false, description: "For action=status without childId, include all stopped historical jobs. Default false shows active/error jobs plus the 5 most recently stopped jobs." },
+    includeStopped: { type: "boolean", default: false, description: "For action=status without childId, include stopped historical jobs in paginated results. Default false includes only the 5 most recently stopped jobs." },
+    limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Maximum jobs per status page (default 20, hard cap 50). Ignored with childId." },
+    offset: { type: "integer", minimum: 0, default: 0, description: "Jobs to skip for the next status page. Ignored with childId. Pages reflect current registry order." },
     childId: { type: "string", description: "Launched child job ID or unique prefix for status/send/wait/stop. For action=wait, omit to return when any active child completes." },
     id: { type: "string", description: "Alias for childId." },
     agentScope: { type: "string", enum: ["user", "project", "both"], description: "Agent discovery scope. Default user." },
@@ -823,10 +828,18 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           const jobs = await loadJobs(root);
           const visibleJobs = inNestedSession ? jobs.jobs.filter((job) => nestedCanAccessJob(job, nestedPolicy.childId)) : jobs.jobs;
           const selected = selectStatusJobs(visibleJobs, params.includeStopped ?? false);
-          const { statuses, warnings: statusWarnings } = await readGlobalStatuses(root, selected.jobs);
+          const limit = Number.isFinite(params.limit) ? Math.max(1, Math.min(50, Math.floor(params.limit!))) : 20;
+          const offset = Number.isFinite(params.offset) ? Math.max(0, Math.floor(params.offset!)) : 0;
+          const { statuses, warnings: statusWarnings } = await readGlobalStatuses(root, selected.jobs.slice(offset, offset + limit));
           const currentJobs = statuses.map(({ job }) => job);
-          const content = [formatJobsStatus(currentJobs, selected.hiddenStopped), statusWarningText(statusWarnings)].filter(Boolean).join("\n");
-          return reply(content, { ...jobs, jobs: currentJobs, statuses, hiddenStopped: selected.hiddenStopped, statusWarnings });
+          const total = selected.jobs.length;
+          const nextOffset = offset + currentJobs.length < total ? offset + currentJobs.length : undefined;
+          const pagination = [
+            `Showing ${currentJobs.length} of ${total} eligible jobs; ${total - currentJobs.length} outside this page (saved registry order).`,
+            nextOffset !== undefined ? `Next page: action: status, includeStopped: ${params.includeStopped ?? false}, offset: ${nextOffset}, limit: ${limit}` : undefined,
+          ].filter(Boolean).join("\n");
+          const content = [formatJobsStatus(currentJobs, selected.hiddenStopped), pagination, statusWarningText(statusWarnings)].filter(Boolean).join("\n");
+          return reply(content, { ...jobs, jobs: currentJobs, statuses, hiddenStopped: selected.hiddenStopped, statusWarnings, total, nextOffset, pagination });
         }
         const status = await getSubagentStatus(root, id);
         if (inNestedSession && !nestedCanAccessJob(status.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
