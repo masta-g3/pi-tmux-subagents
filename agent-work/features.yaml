@@ -20,3 +20,14 @@
   created_at: '2026-09-12'
   plan_file: agent-work/history/20260912_subagent-status-002_idle_child_cleanup.md
   completed_at: '2026-09-12'
+- id: subagent-efficiency-001
+  status: done
+  title: Subagent efficiency
+  subtitle: Reduce overhead and report full usage
+  description: Honor reasoning settings, report lifetime usage, reduce polling overhead,
+    guide efficient reuse and waits, and resume stopped children with their saved
+    conversation.
+  priority: 2
+  created_at: '2026-09-19'
+  plan_file: agent-work/history/20260919_subagent-efficiency-001_subagent_efficiency_resume.md
+  completed_at: '2026-09-19'

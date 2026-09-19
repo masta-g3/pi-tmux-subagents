@@ -19,8 +19,13 @@ function formatCost(value: number): string {
 }
 
 function totalCost(rows: SubagentViewRow[]): string | undefined {
-  const costs = rows.map((row) => row.cost).filter((cost): cost is number => cost !== undefined);
-  return costs.length ? formatCost(costs.reduce((sum, cost) => sum + cost, 0)) : undefined;
+  const withCost = rows.filter((row) => row.cost !== undefined);
+  if (!withCost.length) return undefined;
+  const scopes = new Set(withCost.map((row) => row.usageScope));
+  const scope = scopes.size === 1 ? withCost[0]?.usageScope : undefined;
+  const label = scope === "lifetime" ? "lifetime usage" : scope === "latest-run" ? "latest-run usage" : "mixed usage";
+  const partial = withCost.length < rows.length;
+  return `${formatCost(withCost.reduce((sum, row) => sum + row.cost!, 0))} ${partial ? `partial ${label}` : label}`;
 }
 
 function formatAge(updatedAt: number, now: number): string {

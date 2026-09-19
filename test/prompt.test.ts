@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SYSTEM_PROMPT_APPEND_MAX_LENGTH } from "../src/names.js";
-import { applyThinkingSuffix, buildPiArgs, writePromptFiles } from "../src/prompt.js";
+import { buildPiArgs, writePromptFiles } from "../src/prompt.js";
 import type { AgentConfig, TmuxSubagentJob } from "../src/types.js";
 
 const agent: AgentConfig = {
@@ -36,12 +36,6 @@ function job(dir: string): TmuxSubagentJob {
     updatedAt: 1,
   };
 }
-
-test("applyThinkingSuffix appends once", () => {
-  assert.equal(applyThinkingSuffix("openai/gpt", "low"), "openai/gpt:low");
-  assert.equal(applyThinkingSuffix("openai/gpt:high", "low"), "openai/gpt:high");
-  assert.equal(applyThinkingSuffix("openai/gpt", "off"), "openai/gpt");
-});
 
 test("writePromptFiles writes child boundary and task contract under jobs/id", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-prompt-test-"));
@@ -96,7 +90,8 @@ test("buildPiArgs maps agent config to Pi CLI args", () => {
   });
 
   assert.deepEqual(args, [
-    "--model", "openai/gpt:low",
+    "--model", "openai/gpt",
+    "--thinking", "low",
     "--tools", "read,bash",
     "--no-skills",
     "--approve",
@@ -104,6 +99,34 @@ test("buildPiArgs maps agent config to Pi CLI args", () => {
     "--system-prompt", "/tmp/system.md",
     "@/tmp/task.md",
   ]);
+});
+
+test("buildPiArgs emits explicit thinking settings with model suffix precedence", () => {
+  const cases: Array<{ model?: string; thinking?: AgentConfig["thinking"]; expected: string[] }> = [
+    { model: "openai/gpt", thinking: "off", expected: ["--model", "openai/gpt", "--thinking", "off"] },
+    { thinking: "off", expected: ["--thinking", "off"] },
+    { model: "openai/gpt:high", thinking: "low", expected: ["--model", "openai/gpt", "--thinking", "high"] },
+    { model: "openai/gpt", expected: ["--model", "openai/gpt"] },
+    { model: "openrouter/vendor:model", thinking: "medium", expected: ["--model", "openrouter/vendor:model", "--thinking", "medium"] },
+  ];
+
+  for (const { model, thinking, expected } of cases) {
+    const args = buildPiArgs({
+      agent: { ...agent, model, thinking },
+      taskPath: "/tmp/task.md",
+      agentSystemPath: "/tmp/system.md",
+      childBootstrapPath: "/tmp/bootstrap.js",
+    });
+    assert.deepEqual(args, [
+      ...expected,
+      "--tools", "read,bash",
+      "--no-skills",
+      "--approve",
+      "--extension", "/tmp/bootstrap.js",
+      "--system-prompt", "/tmp/system.md",
+      "@/tmp/task.md",
+    ]);
+  }
 });
 
 test("buildPiArgs exposes tmux_subagent when nested launches are allowed", () => {

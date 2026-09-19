@@ -7,18 +7,18 @@ import { formatAgentStatus } from "./format.js";
 import { renderToolCall, renderToolResult } from "./render.js";
 import { STATUS_KEY } from "./names.js";
 import { stateRoot } from "./paths.js";
-import { DEFAULT_IDLE_TIMEOUT_MS, cancelSubagent, getSubagentStatus, launchSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent } from "./run.js";
+import { DEFAULT_IDLE_TIMEOUT_MS, cancelSubagent, getSubagentStatus, getSubagentStatuses, readSubagentResult, resumeSubagent, launchSubagent, sendSubagentAttentionReply, sendSubagentMessage, waitForAnySubagent, waitForSubagent } from "./run.js";
 import { isFreshSessionSummary, readSessionSummaries, SESSION_SUMMARY_STALE_MS, type SessionSummaryMetadata } from "./session-summary.js";
-import { loadJobs } from "./state.js";
+import { loadJobs, resolveJob } from "./state.js";
 import { createSubagentsLibraryView, formatAgentLibraryList } from "./subagents-library-view.js";
 import { createSubagentsView, type SubagentsViewAction } from "./subagents-view.js";
 import { createSubagentsWidget, nextWidgetAgeRefreshMs } from "./subagents-widget.js";
 import { SUBAGENT_UI } from "./ui-tokens.js";
 import { toSubagentViewRows, type SubagentViewRow } from "./view-model.js";
-import type { AgentScope, SubagentStatusResult, TmuxSubagentJob } from "./types.js";
+import type { AgentScope, SubagentStatusResult, TmuxSubagentJob, TmuxSubagentsRegistry } from "./types.js";
 
 type ToolParams = {
-  action?: "list" | "get" | "status" | "cancel" | "stop" | "send" | "wait";
+  action?: "list" | "get" | "status" | "cancel" | "stop" | "send" | "wait" | "resume";
   agent?: string;
   task?: string;
   label?: string;
@@ -382,30 +382,31 @@ function statusWarningText(warnings: StatusWarning[]): string | undefined {
   return `Warning: ${warnings.length} active child status${warnings.length === 1 ? "" : "es"} could not be refreshed; showing saved registry state.`;
 }
 
-async function readGlobalStatuses(root: string, jobs: TmuxSubagentJob[]): Promise<{ statuses: SubagentStatusResult[]; warnings: StatusWarning[] }> {
+async function readGlobalStatuses(root: string, jobs: TmuxSubagentJob[], registry: TmuxSubagentsRegistry): Promise<{ statuses: SubagentStatusResult[]; warnings: StatusWarning[] }> {
   const warnings: StatusWarning[] = [];
-  const statuses = await Promise.all(jobs.map(async (job): Promise<SubagentStatusResult> => {
-    if (job.status === "stopped") return { job, status: "stopped", autoStopped: job.autoStopped };
-    try {
-      return await getSubagentStatus(root, job.id);
-    } catch (error) {
-      warnings.push({ jobId: job.id, error: error instanceof Error ? error.message : String(error) });
-      return { job, status: job.status };
-    }
-  }));
-  return { statuses, warnings };
+  const active = jobs.filter(job => job.status !== "stopped");
+  const results = await getSubagentStatuses(root, active.map(job => job.id), undefined, {registry});
+  const byId = new Map(active.map((job,index) => [job.id,results[index]!]));
+  const statuses = jobs.map((job): SubagentStatusResult => {
+    if (job.status === "stopped") return {job,status:"stopped",autoStopped:job.autoStopped};
+    const result = byId.get(job.id)!;
+    if (result.status === "fulfilled") return result.value;
+    warnings.push({jobId:job.id,error:result.reason instanceof Error ? result.reason.message : String(result.reason)});
+    return {job,status:job.status};
+  });
+  return {statuses,warnings};
 }
 
 const TmuxSubagentParams = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop", "send", "wait"], description: "Management action. Omit to launch an agent. get reads an agent definition; status/wait/send/stop manage launched child jobs. stop is an alias for cancel." },
+    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop", "send", "wait", "resume"], description: "Management action. Omit to launch. get reads agent definitions. send continues a live child; resume restarts a stopped child with its saved conversation and a required message. stop is an alias for cancel." },
     agent: { type: "string", description: "Agent definition name for launch/get, e.g. scout or code-critic. Not a launched child job id." },
     task: { type: "string", description: "Task for launch." },
     label: { type: "string", description: "Optional short dashboard label for launch; prefix with agent type, e.g. worker-auth or scout-api." },
-    message: { type: "string", description: "Message to send for action=send." },
-    wait: { type: "boolean", description: "For action=send, wait for the next completed turn before returning. Prefer false unless blocked. Default false." },
-    timeoutMs: { type: "number", description: "Optional timeout for action=send with wait=true or action=wait; wait leaves children alive on timeout." },
+    message: { type: "string", description: "Follow-up message for send or resume. Required for resume." },
+    wait: { type: "boolean", description: "For send/resume, wait for the next completed turn. Default false; use true only when blocked." },
+    timeoutMs: { type: "number", description: "Optional timeout for wait or send/resume with wait=true. Choose a useful bounded wait rather than repeated short status/wait loops. Timeout leaves children alive; do not relaunch them." },
     background: { type: "boolean", description: "Return immediately after spawning the tmux child. Default false." },
     includeStopped: { type: "boolean", default: false, description: "For action=status without childId, include stopped historical jobs in paginated results. Default false includes only the 5 most recently stopped jobs." },
     limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Maximum jobs per status page (default 20, hard cap 50). Ignored with childId." },
@@ -428,8 +429,8 @@ function text(content: string, details?: unknown, isError?: boolean) {
 }
 
 function statusResultPath(status: SubagentStatusResult): string | undefined {
-  if (!status.latestTurn && !status.latestResult && !status.result) return undefined;
-  return status.latestTurn?.resultPath ?? status.job.resultPath;
+  if (!status.resultPath && !status.latestTurn && !status.latestResult && !status.result) return undefined;
+  return status.resultPath ?? status.latestTurn?.resultPath ?? status.job.resultPath;
 }
 
 function statusReadCall(status: SubagentStatusResult): string | undefined {
@@ -451,6 +452,9 @@ function formatStoppedSendHint(status: SubagentStatusResult): string {
     `Cannot send to stopped subagent: ${status.job.id}`,
     path ? `Result is available at: ${path}` : undefined,
     statusReadCall(status),
+    status.job.sessionFile && status.job.sessionId && status.job.resolvedModel && status.job.resolvedThinking
+      ? "For a follow-up, use resume with childId and message. For expected iterative work, launch with autoStopOnComplete: false and stop when finished."
+      : undefined,
   ].filter(Boolean).join("\n");
 }
 
@@ -458,15 +462,17 @@ function formatBusySendHint(status: SubagentStatusResult): string {
   return [
     `Cannot send to busy subagent ${status.job.id}; wait until it is idle.`,
     `Check later with: tmux_subagent({ action: "status", childId: "${status.job.id}" })`,
+    "Do useful work before checking again. If blocked, use one suitably bounded wait; do not relaunch this child.",
   ].join("\n");
 }
 
 function formatTimeoutHint(error: unknown, childId?: string): string {
   const message = error instanceof Error ? error.message : String(error);
   if (!/Timed out/.test(message)) return message;
+  const guidance = "Do useful work before checking again, or use a longer bounded wait if blocked. Do not resume or relaunch a live child.";
   return childId
-    ? [`Timed out; child is still alive: ${childId}`, `Check later with: tmux_subagent({ action: "status", childId: "${childId}" })`].join("\n")
-    : ["Timed out; child subagents are still alive.", "Check later with: tmux_subagent({ action: \"status\" })"].join("\n");
+    ? [`Timed out; child is still alive: ${childId}`, `Check later with: tmux_subagent({ action: "status", childId: "${childId}" })`, guidance].join("\n")
+    : ["Timed out; child subagents are still alive.", "Check later with: tmux_subagent({ action: \"status\" })", guidance].join("\n");
 }
 
 export function resolveAutoStopOnComplete(value: boolean | undefined): boolean {
@@ -524,12 +530,13 @@ type SubagentSnapshot = { statuses: SubagentStatusResult[]; summaries: Map<strin
 function refreshSubagentSnapshot(root: string, scope: RefreshScope): Promise<SubagentSnapshot> {
   const generation = refreshGeneration;
   const run = async (): Promise<SubagentSnapshot> => {
+    const registry = await loadJobs(root);
     const jobs = scope === "manager"
-      ? selectStatusJobs((await loadJobs(root)).jobs, false).jobs
-      : [...activeJobs.values()].map((status) => status.job);
+      ? selectStatusJobs(registry.jobs, false).jobs
+      : registry.jobs.filter(job => activeJobs.has(job.id));
     const ids = [...new Set(jobs.map((job) => job.id))];
-    const refreshed = await Promise.all(ids.map((id) => getSubagentStatus(root, id).catch(() => undefined)));
-    const statuses = refreshed.filter((status): status is SubagentStatusResult => Boolean(status));
+    const refreshed = await getSubagentStatuses(root, ids, undefined, {registry});
+    const statuses = refreshed.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
     const summaries = await readSessionSummaries(statuses.map((status) => status.job.id)).catch(() => new Map<string, SessionSummaryMetadata>());
     const rows = toSubagentViewRows(statuses, { summaries });
 
@@ -621,6 +628,7 @@ async function openSubagentsView(root: string, ctx: PiContext) {
             finish: done as (value: SubagentsViewAction | undefined) => void,
             requestRender: () => tui.requestRender?.(),
             refreshNow: refresh,
+            readResult: (row) => readSubagentResult(root, row.id, row.status),
           }, { selectedId });
           const timer = setInterval(() => {
             void refresh().catch((error) => {
@@ -773,7 +781,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "tmux_subagent",
     label: "tmux subagent",
-    description: "Launch and manage Markdown-defined subagents as real tmux-backed Pi sessions. Prefer background launches plus useful parent-side work and later status checks over blocking waits; use wait only when the parent is truly blocked. Use label for parallel workers/scouts, prefixed by agent type (for example worker-auth).",
+    description: "Launch and manage Markdown-defined subagents as tmux-backed Pi sessions. For iterative work set autoStopOnComplete: false, send follow-ups, then stop. Resume a stopped child explicitly with a message when saved session metadata exists. Prefer background work; when blocked use one bounded wait instead of repeated status/wait calls. Timeout is not a reason to relaunch. Use short agent-prefixed labels for parallel children.",
     parameters: TmuxSubagentParams,
     renderCall: renderToolCall,
     renderResult: renderToolResult,
@@ -830,7 +838,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           const selected = selectStatusJobs(visibleJobs, params.includeStopped ?? false);
           const limit = Number.isFinite(params.limit) ? Math.max(1, Math.min(50, Math.floor(params.limit!))) : 20;
           const offset = Number.isFinite(params.offset) ? Math.max(0, Math.floor(params.offset!)) : 0;
-          const { statuses, warnings: statusWarnings } = await readGlobalStatuses(root, selected.jobs.slice(offset, offset + limit));
+          const { statuses, warnings: statusWarnings } = await readGlobalStatuses(root, selected.jobs.slice(offset, offset + limit), jobs);
           const currentJobs = statuses.map(({ job }) => job);
           const total = selected.jobs.length;
           const nextOffset = offset + currentJobs.length < total ? offset + currentJobs.length : undefined;
@@ -845,6 +853,27 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         if (inNestedSession && !nestedCanAccessJob(status.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
         trackStatus(status);
         return reply(formatAgentStatus(status), status);
+      }
+
+      if (params.action === "resume") {
+        const id = params.childId ?? params.id;
+        if (!id) return reply("Missing childId for resume.", undefined, true);
+        if (!params.message?.trim()) return reply("Resume requires a nonblank message.", undefined, true);
+        const launchOnly: (keyof ToolParams)[] = ["agent","task","label","cwd","model","agentScope","background","autoStopOnComplete","idleTimeoutMs","allowNestedSubagents","nestedAgentAllowlist","maxNestedDepth"];
+        if (launchOnly.some(key => params[key] !== undefined)) return reply("Resume does not accept launch-only overrides; it uses the saved child configuration.", undefined, true);
+        try {
+          const saved = await resolveJob(root, id);
+          if (inNestedSession && (!nestedCanAccessJob(saved, nestedPolicy.childId) || !nestedPolicy.allowlist.includes(saved.agentName) || nestedPolicy.depth + 1 > maxNestedDepth())) {
+            return reply("Nested children may resume only their own allowed jobs within the depth limit.", undefined, true);
+          }
+          const before = await getSubagentStatus(root, saved.id);
+          const job = await resumeSubagent(root, before.job.id, params.message);
+          trackJob(job);
+          if (!params.wait) return reply(`Resumed ${jobDisplayName(job)} as ${job.id}\nstate: starting`, job);
+          const status = await waitForSubagent(root,job.id,undefined,{signal,timeoutMs:params.timeoutMs,afterTurnIndex:before.latestTurn?.index ?? 0,executionId:job.executionId,cancelOnAbort:false});
+          trackStatus(status);
+          return reply(formatAgentStatus(status),status,status.status === "error");
+        } catch (error) { return reply(formatTimeoutHint(error,id),undefined,true); }
       }
 
       if (params.action === "send") {

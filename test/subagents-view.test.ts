@@ -14,7 +14,7 @@ function status(id: string, overrides: Partial<SubagentStatusResult> = {}): Suba
   };
 }
 
-function harness(statuses: SubagentStatusResult[], selectedId?: string) {
+function harness(statuses: SubagentStatusResult[], selectedId?: string, readResult?: (row: ReturnType<typeof toSubagentViewRows>[number]) => Promise<string | undefined>) {
   const actions: unknown[] = [];
   let renders = 0;
   let refreshes = 0;
@@ -23,6 +23,7 @@ function harness(statuses: SubagentStatusResult[], selectedId?: string) {
     finish: (action) => actions.push(action),
     requestRender: () => { renders += 1; },
     refreshNow: async () => { refreshes += 1; },
+    readResult,
   }, { selectedId });
   return { component, actions, get renders() { return renders; }, get refreshes() { return refreshes; } };
 }
@@ -75,6 +76,58 @@ test("Enter performs the selected row primary action and local disclosures reque
   assert.equal(doneHarness.actions.length, 0);
   assert.match(doneHarness.component.render(100).join("\n"), /Delivered the requested result/);
   assert.match(doneHarness.component.render(100).join("\n"), /enter hide result/);
+});
+
+test("manager hydrates result only when expanded and ignores stale responses", async () => {
+  const pending: Array<(value: string | undefined) => void> = [];
+  const reads: string[] = [];
+  const done = status("done", {
+    status: "stopped",
+    job: { ...status("done").job, status: "stopped", executionId: "execution-1" },
+    latestTurn: { index: 1, status: "waiting", startedAt: 1, completedAt: 2, resultPath: "/tmp/done/turns/001-result.md" },
+    latestResult: "embedded stale body",
+  });
+  const view = harness([done], undefined, async (row) => {
+    reads.push(row.id);
+    return new Promise<string | undefined>((resolve) => pending.push(resolve));
+  });
+
+  assert.equal(reads.length, 0);
+  view.component.render(100);
+  assert.equal(reads.length, 0);
+  view.component.handleInput("\r");
+  assert.deepEqual(reads, ["done"]);
+  assert.match(view.component.render(100).join("\n"), /Loading result/);
+  view.component.handleInput("\r");
+  pending[0]!("must not appear");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.doesNotMatch(view.component.render(100).join("\n"), /must not appear/);
+
+  view.component.handleInput("\r");
+  pending[1]!("hydrated result body");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(view.component.render(100).join("\n"), /hydrated result body/);
+  assert.deepEqual(reads, ["done", "done"]);
+});
+
+test("manager clears hydrated result when execution changes", async () => {
+  const done = status("done", {
+    status: "stopped",
+    job: { ...status("done").job, status: "stopped", executionId: "execution-1" },
+    latestTurn: { index: 1, status: "waiting", startedAt: 1, completedAt: 2, resultPath: "/tmp/done/turns/001-result.md" },
+  });
+  const view = harness([done], undefined, async () => "first execution body");
+  view.component.handleInput("\r");
+  await Promise.resolve();
+  assert.match(view.component.render(100).join("\n"), /first execution body/);
+
+  const next = status("done", {
+    status: "stopped",
+    job: { ...done.job, executionId: "execution-2" },
+    latestTurn: { ...done.latestTurn!, index: 2, resultPath: "/tmp/done/turns/002-result.md" },
+  });
+  view.component.updateRows(toSubagentViewRows([next], { now: 20_000 }));
+  assert.doesNotMatch(view.component.render(100).join("\n"), /first execution body/);
 });
 
 test("manager result excerpt is bounded, wrapped, and sanitized", () => {

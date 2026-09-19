@@ -4,7 +4,7 @@ import { SYSTEM_PROMPT_APPEND_MAX_LENGTH } from "./names.js";
 import { agentSystemPath, taskPath } from "./paths.js";
 import type { AgentConfig, AgentTools, ThinkingLevel, TmuxSubagentJob } from "./types.js";
 
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 const CHILD_BOUNDARY = `You are a child subagent launched from a parent Pi session.
 The parent owns orchestration, scope decisions, and follow-up work.
@@ -18,11 +18,17 @@ export interface PromptFiles {
   taskPath: string;
 }
 
-export function applyThinkingSuffix(model: string | undefined, thinking: ThinkingLevel | undefined): string | undefined {
-  if (!model || !thinking || thinking === "off") return model;
+function resolveModelAndThinking(model: string | undefined, thinking: ThinkingLevel | undefined): {
+  model: string | undefined;
+  thinking: ThinkingLevel | undefined;
+} {
+  if (!model) return { model, thinking };
   const colonIndex = model.lastIndexOf(":");
-  if (colonIndex !== -1 && THINKING_LEVELS.has(model.slice(colonIndex + 1))) return model;
-  return `${model}:${thinking}`;
+  const suffix = colonIndex === -1 ? undefined : model.slice(colonIndex + 1);
+  if (suffix && THINKING_LEVELS.has(suffix as ThinkingLevel)) {
+    return { model: model.slice(0, colonIndex), thinking: suffix as ThinkingLevel };
+  }
+  return { model, thinking };
 }
 
 function taskContract(job: TmuxSubagentJob, task: string): string {
@@ -94,8 +100,9 @@ export function buildPiArgs(input: {
 }): string[] {
   const agent = withNestedTool(input.agent, input.allowNestedSubagents);
   const args: string[] = [];
-  const model = applyThinkingSuffix(agent.model, agent.thinking);
+  const { model, thinking } = resolveModelAndThinking(agent.model, agent.thinking);
   if (model) args.push("--model", model);
+  if (thinking) args.push("--thinking", thinking);
   addToolArgs(args, agent.tools);
   if (!agent.inheritProjectContext) args.push("--no-context-files");
   if (!agent.inheritSkills) args.push("--no-skills");

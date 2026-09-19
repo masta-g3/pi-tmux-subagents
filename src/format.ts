@@ -33,17 +33,34 @@ function statusUsage(status: SubagentStatusResult): TmuxSubagentUsage | undefine
   return status.usage ?? status.heartbeat?.usage ?? status.latestTurn?.usage;
 }
 
+function statusUsageScope(status: SubagentStatusResult): "lifetime" | "latest-run" {
+  return status.usageScope ?? "latest-run";
+}
+
+function usageScopeLabel(scope: "lifetime" | "latest-run"): string {
+  return scope === "lifetime" ? "lifetime" : "latest run";
+}
+
 function formatCompactUsage(status: SubagentStatusResult): string | undefined {
   const usage = statusUsage(status);
   if (!usage) return undefined;
-  return `${formatNumber(usage.input)}/${formatNumber(usage.output)} · ${formatCost(usage.cost.total)}`;
+  return `${formatNumber(usage.input)}/${formatNumber(usage.output)} · ${formatCost(usage.cost.total)} · ${usageScopeLabel(statusUsageScope(status))}`;
 }
 
 function formatCardUsage(status: SubagentStatusResult): string | undefined {
   const usage = statusUsage(status);
   if (!usage) return undefined;
   const tokenText = usage.output > 0 ? `${formatNumber(usage.output)} out` : `${formatNumber(usage.input)} in`;
-  return `${tokenText} · ${formatCost(usage.cost.total)}`;
+  return `${tokenText} · ${formatCost(usage.cost.total)} · ${usageScopeLabel(statusUsageScope(status))}`;
+}
+
+function formatTotalUsage(statuses: SubagentStatusResult[], totalCost: number): string {
+  const withUsage = statuses.filter((status) => statusUsage(status));
+  const scopes = new Set(withUsage.map(statusUsageScope));
+  const partial = withUsage.length < statuses.length;
+  const scope = scopes.size === 1 ? [...scopes][0] : undefined;
+  const label = scope === "lifetime" ? "lifetime usage" : scope === "latest-run" ? "latest-run usage" : "mixed usage";
+  return `${formatCost(totalCost)} ${partial ? `partial ${label}` : label}`;
 }
 
 function lastActivity(status: SubagentStatusResult): string | undefined {
@@ -97,7 +114,7 @@ function statusElapsed(status: SubagentStatusResult): string {
 }
 
 function resultFilePath(status: SubagentStatusResult): string {
-  return status.latestTurn?.resultPath ?? status.job.resultPath;
+  return status.resultPath ?? status.latestTurn?.resultPath ?? status.job.resultPath;
 }
 
 function resultBasename(status: SubagentStatusResult): string {
@@ -105,7 +122,7 @@ function resultBasename(status: SubagentStatusResult): string {
 }
 
 function hasResult(status: SubagentStatusResult): boolean {
-  return Boolean(status.latestTurn || status.latestResult || status.result);
+  return Boolean(status.resultPath || status.latestTurn || status.latestResult || status.result);
 }
 
 export function formatSubagentFooterStatus(statuses: SubagentStatusResult[]): string | undefined {
@@ -125,7 +142,7 @@ export function formatSubagentFooterStatus(statuses: SubagentStatusResult[]): st
   const order = ["needs input", "error", "starting", "running", "idle", "done", "stopped"];
   const labels = [...order.filter((label) => counts.has(label)), ...[...counts.keys()].filter((label) => !order.includes(label))];
   const summary = labels.map((label) => `${counts.get(label)} ${label}`).join(" · ");
-  return [`subagents: ${summary}`, hasCost ? formatCost(totalCost) : undefined].filter(Boolean).join(" · ");
+  return [`subagents: ${summary}`, hasCost ? formatTotalUsage(statuses, totalCost) : undefined].filter(Boolean).join(" · ");
 }
 
 function formatSubagentWidgetRows(statuses: SubagentStatusResult[]): string[] {
@@ -176,7 +193,7 @@ export function formatUserStatus(status: SubagentStatusResult): string {
   if (status.status === "error") {
     if (status.job.error) lines.push(`   error: ${status.job.error}`);
     lines.push(`   inspect result → ${resultBasename(status)}`);
-  } else if ((status.status === "waiting" || status.status === "stopped") && (status.latestTurn || status.latestResult || status.result)) {
+  } else if ((status.status === "waiting" || status.status === "stopped") && hasResult(status)) {
     lines.push(`   ✓ result ready → ${resultBasename(status)}`);
   }
   return lines.join("\n");
@@ -188,6 +205,9 @@ export function formatAgentStatus(status: SubagentStatusResult): string {
     const path = resultFilePath(status);
     lines.push(`   read: ${path}`);
     lines.push(`   next: read({ path: ${JSON.stringify(path)}, limit: 2000 })`);
+  }
+  if (status.status === "stopped" && status.job.sessionFile && status.job.sessionId && status.job.resolvedModel && status.job.resolvedThinking) {
+    lines.push(`   follow-up: use action: "resume", childId: "${status.job.id}" and a new message`);
   }
   if (status.status === "waiting" && status.job.autoStopOnComplete === false && !status.job.idleTimeoutMs) {
     lines.push("   cleanup: persistent child is idle; stop when done");
@@ -221,7 +241,7 @@ export function formatStatus(status: SubagentStatusResult): string {
     `   tmux: ${status.job.tmuxSession}`,
     ...(status.job.model ? [`   model: ${status.job.model}`] : []),
     `   attach: tmux attach-session -t ${status.job.tmuxSession}`,
-    `   output: ${status.latestTurn?.resultPath ?? status.job.resultPath}`,
+    `   output: ${resultFilePath(status)}`,
   );
   if (status.autoStopped) {
     lines.push("   auto-stopped after completion");
