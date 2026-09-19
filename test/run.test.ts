@@ -203,7 +203,7 @@ for (const initiallyWaiting of [false, true]) {
     const launchTmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
     const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Race", background: true, tmux: launchTmux });
     await writeFile(join(root, "jobs", job.id, "heartbeat.json"), JSON.stringify({
-      jobId: job.id,
+      jobId: job.id, executionId: job.executionId,
       cwd: root,
       state: "waiting",
       stateSince: 2,
@@ -237,7 +237,7 @@ test("getSubagentStatus reads heartbeat result and pane preview", async () => wi
   const jobDir = join(root, "jobs", job.id);
   await mkdir(jobDir, { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-    jobId: job.id,
+    jobId: job.id, executionId: job.executionId,
     cwd: root,
     state: "waiting",
     stateSince: 2,
@@ -246,7 +246,7 @@ test("getSubagentStatus reads heartbeat result and pane preview", async () => wi
   }), "utf8");
   await writeFile(join(jobDir, "result.md"), "done", "utf8");
 
-  const status = await getSubagentStatus(root, job.id.slice(0, 8), tmux);
+  const status = await getSubagentStatus(root, job.id.slice(0, 8), tmux, {readResults:true,capturePreview:true});
   assert.equal(status.status, "waiting");
   assert.equal(status.result, "done");
   assert.equal(status.preview, "pane preview");
@@ -259,7 +259,7 @@ test("getSubagentStatus rejects malformed usage before rendering", async () => w
     const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect", background: true, tmux });
     const heartbeat = join(root, "jobs", job.id, "heartbeat.json");
     for (const usage of [{ input: 1, output: 2 }, { input: 1, output: 2, cost: { total: "0.1" } }]) {
-      await writeFile(heartbeat, JSON.stringify({ state: "running", seenRunning: true, usage }));
+      await writeFile(heartbeat, JSON.stringify({ executionId: job.executionId, state: "running", seenRunning: true, usage }));
       await assert.rejects(getSubagentStatus(root, job.id, tmux), /Invalid usage/);
     }
   } finally {
@@ -275,7 +275,7 @@ test("getSubagentStatus keeps latestResult scoped to turn results", async () => 
   await mkdir(jobDir, { recursive: true });
   await writeFile(join(jobDir, "result.md"), "legacy", "utf8");
 
-  const status = await getSubagentStatus(root, job.id, tmux);
+  const status = await getSubagentStatus(root, job.id, tmux, {readResults:true,capturePreview:true});
 
   assert.equal(status.result, "legacy");
   assert.equal(status.latestResult, undefined);
@@ -292,7 +292,7 @@ test("getSubagentStatus prefers latest turn result", async () => withNoAgentHub(
   const turnsDir = join(jobDir, "turns");
   await mkdir(turnsDir, { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-    jobId: job.id,
+    jobId: job.id, executionId: job.executionId,
     cwd: root,
     state: "waiting",
     stateSince: 2,
@@ -306,7 +306,7 @@ test("getSubagentStatus prefers latest turn result", async () => withNoAgentHub(
     turns: [{ index: 1, status: "waiting", startedAt: 2, completedAt: 3, resultPath: join(turnsDir, "001-result.md") }],
   }), "utf8");
 
-  const status = await getSubagentStatus(root, job.id, tmux);
+  const status = await getSubagentStatus(root, job.id, tmux, {readResults:true,capturePreview:true});
 
   assert.equal(status.latestTurn?.index, 1);
   assert.equal(status.latestResult, "turn one");
@@ -339,12 +339,12 @@ test("getSubagentStatus preserves child errors in the Agent Hub mirror", async (
     process.env.PI_AGENT_HUB_SESSION_ID = "parent-1";
     const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect", background: true, tmux });
     const heartbeatPath = join(root, "jobs", job.id, "heartbeat.json");
-    await writeFile(heartbeatPath, JSON.stringify({ state: "error", seenRunning: true, message: "Provider failed" }));
+    await writeFile(heartbeatPath, JSON.stringify({ executionId: job.executionId, state: "error", seenRunning: true, message: "Provider failed" }));
     const status = await getSubagentStatus(root, job.id, tmux);
     assert.equal(status.job.error, "Provider failed");
     const mirroredJob = async () => JSON.parse(await readFile(registryPath, "utf8")).sessions.find((row: { id: string }) => row.id === job.id);
     assert.equal((await mirroredJob()).error, "Provider failed");
-    await writeFile(heartbeatPath, JSON.stringify({ state: "running", seenRunning: true }));
+    await writeFile(heartbeatPath, JSON.stringify({ executionId: job.executionId, state: "running", seenRunning: true }));
     await getSubagentStatus(root, job.id, tmux);
     assert.equal((await mirroredJob()).error, undefined);
   } finally {
@@ -396,7 +396,7 @@ test("sendSubagentMessage bracket-pastes multiline messages into idle live sessi
   const jobDir = join(root, "jobs", job.id);
   await mkdir(jobDir, { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-    jobId: job.id,
+    jobId: job.id, executionId: job.executionId,
     cwd: root,
     state: "waiting",
     stateSince: 2,
@@ -428,7 +428,7 @@ test("sendSubagentAttentionReply allows explicit attention while running", async
   const jobDir = join(root, "jobs", job.id);
   await mkdir(jobDir, { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-    jobId: job.id,
+    jobId: job.id, executionId: job.executionId,
     cwd: root,
     state: "running",
     stateSince: 2,
@@ -449,7 +449,7 @@ test("sendSubagentMessage rejects busy sessions", async () => withNoAgentHub(asy
   const jobDir = join(root, "jobs", job.id);
   await mkdir(jobDir, { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-    jobId: job.id,
+    jobId: job.id, executionId: job.executionId,
     cwd: root,
     state: "running",
     stateSince: 2,
@@ -468,7 +468,7 @@ test("waitForSubagent can wait for a later completed turn", async () => withNoAg
   const jobDir = join(root, "jobs", job.id);
   await mkdir(join(jobDir, "turns"), { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-    jobId: job.id,
+    jobId: job.id, executionId: job.executionId,
     cwd: root,
     state: "waiting",
     stateSince: 2,
@@ -494,7 +494,8 @@ test("waitForSubagent can wait for a later completed turn", async () => withNoAg
   });
 
   assert.equal(status.latestTurn?.index, 1);
-  assert.equal(status.result, "done");
+  assert.equal(status.resultPath, join(jobDir, "turns", "001-result.md"));
+  assert.equal(status.result, undefined, "waiting must not read result bodies");
 }));
 
 test("waitForSubagent returns already waiting sessions without requiring a future turn", async () => withNoAgentHub(async () => {
@@ -506,7 +507,7 @@ test("waitForSubagent returns already waiting sessions without requiring a futur
   const resultPath = join(turnsDir, "001-result.md");
   await mkdir(turnsDir, { recursive: true });
   await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-    jobId: job.id,
+    jobId: job.id, executionId: job.executionId,
     cwd: root,
     state: "waiting",
     stateSince: 2,
@@ -523,7 +524,8 @@ test("waitForSubagent returns already waiting sessions without requiring a futur
 
   assert.equal(status.status, "waiting");
   assert.equal(status.latestTurn?.index, 1);
-  assert.equal(status.result, "done");
+  assert.equal(status.resultPath, resultPath);
+  assert.equal(status.result, undefined, "waiting must not read result bodies");
 }));
 
 test("waitForAnySubagent returns the first active child that completes", async () => withNoAgentHub(async () => {
@@ -536,7 +538,7 @@ test("waitForAnySubagent returns the first active child that completes", async (
     const jobDir = join(root, "jobs", job.id);
     await mkdir(jobDir, { recursive: true });
     await writeFile(join(jobDir, "heartbeat.json"), JSON.stringify({
-      jobId: job.id,
+      jobId: job.id, executionId: job.executionId,
       cwd: root,
       state: "running",
       stateSince: 2,
@@ -552,7 +554,7 @@ test("waitForAnySubagent returns the first active child that completes", async (
       updates += 1;
       if (updates === 1) {
         writeFileSync(join(root, "jobs", second.id, "heartbeat.json"), JSON.stringify({
-          jobId: second.id,
+          jobId: second.id, executionId: second.executionId,
           cwd: root,
           state: "waiting",
           stateSince: 4,

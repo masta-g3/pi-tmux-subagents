@@ -78,3 +78,25 @@ test("view model keeps nested parent metadata", () => {
 
   assert.equal(row.parentId, "parent-abcdef123456");
 });
+
+test("view model recognizes a lightweight confirmed result path", () => {
+  const row = toSubagentViewRows([status({
+    status: "stopped",
+    job: { ...status().job, status: "stopped" },
+    resultPath: "/tmp/jobs/child-123/turns/002-result.md",
+  })])[0]!;
+
+  assert.equal(row.resultFile, "002-result.md");
+  assert.equal(row.primaryAction, "result");
+});
+
+test("view model labels lifetime and legacy latest-run usage", () => {
+  const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 120, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.03 } };
+  const lifetime = toSubagentViewRows([status({ usage, usageScope: "lifetime" })])[0]!;
+  const legacy = toSubagentViewRows([status({ usage })])[0]!;
+
+  assert.equal(lifetime.usage, "20 out · $0.03 · lifetime");
+  assert.equal(lifetime.usageScope, "lifetime");
+  assert.equal(legacy.usage, "20 out · $0.03 · latest run");
+  assert.equal(legacy.usageScope, "latest-run");
+});
