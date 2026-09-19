@@ -20,6 +20,7 @@ export interface SubagentViewRow {
   updatedAt: number;
   age: string;
   usage?: string;
+  usageScope?: "lifetime" | "latest-run";
   cost?: number;
   resultFile?: string;
   canReply: boolean;
@@ -68,19 +69,27 @@ function statusUsage(status: SubagentStatusResult): TmuxSubagentUsage | undefine
   return status.usage ?? status.heartbeat?.usage ?? status.latestTurn?.usage;
 }
 
+function statusUsageScope(status: SubagentStatusResult): "lifetime" | "latest-run" {
+  return status.usageScope ?? "latest-run";
+}
+
+function usageScopeLabel(scope: "lifetime" | "latest-run"): string {
+  return scope === "lifetime" ? "lifetime" : "latest run";
+}
+
 function compactUsage(status: SubagentStatusResult): string | undefined {
   const usage = statusUsage(status);
   if (!usage) return undefined;
-  return `${formatNumber(usage.output || usage.input)} ${usage.output ? "out" : "in"} · ${formatCost(usage.cost.total)}`;
+  return `${formatNumber(usage.output || usage.input)} ${usage.output ? "out" : "in"} · ${formatCost(usage.cost.total)} · ${usageScopeLabel(statusUsageScope(status))}`;
 }
 
 function hasResult(status: SubagentStatusResult): boolean {
-  return Boolean(status.latestTurn || status.latestResult || status.result);
+  return Boolean(status.resultPath || status.latestTurn || status.latestResult || status.result);
 }
 
 function resultFile(status: SubagentStatusResult): string | undefined {
   if (!hasResult(status)) return undefined;
-  return basename(status.latestTurn?.resultPath ?? status.job.resultPath);
+  return basename(status.resultPath ?? status.latestTurn?.resultPath ?? status.job.resultPath);
 }
 
 function groupFor(status: SubagentStatusResult): SubagentPresentationGroup {
@@ -164,6 +173,7 @@ export function toSubagentViewRows(statuses: SubagentStatusResult[], options: Su
       updatedAt,
       age: formatDuration(now - updatedAt),
       usage: compactUsage(status),
+      usageScope: statusUsage(status) ? statusUsageScope(status) : undefined,
       cost: statusUsage(status)?.cost.total,
       resultFile: resultFile(status),
       canReply: group === "idle" || group === "needsInput",

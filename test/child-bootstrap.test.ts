@@ -499,6 +499,182 @@ test("child bootstrap writes final assistant text to latest and turn result path
   });
 });
 
+test("new children publish exact session metadata and persisted lifetime usage across runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-lifetime-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  const entries: any[] = [];
+  const usage = (input: number, output: number, total: number) => ({
+    input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total },
+  });
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: false, idleTimeoutMs: 0, accountingVersion: 1, executionId: "exec-1" });
+    await withChildEnv(root, resultPath, async () => {
+      process.env.PI_TMUX_SUBAGENTS_EXECUTION_ID = "exec-1";
+      const handlers = loadBootstrapHandlers("high");
+      const ctx = {
+        cwd: root, isIdle: () => true, shutdown() {}, ui: { notify() {} },
+        model: { provider: "test-provider", id: "test-model" },
+        sessionManager: {
+          getSessionFile: () => join(root, "session.jsonl"), getSessionId: () => "session-1", getEntries: () => entries,
+        },
+      };
+      await handlers.session_start?.({ reason: "startup" }, ctx);
+      let job = JSON.parse(await readFile(join(root, "jobs.json"), "utf8")).jobs[0];
+      assert.equal(job.sessionFile, join(root, "session.jsonl"));
+      assert.equal(job.sessionId, "session-1");
+      assert.equal(job.resolvedModel, "test-provider/test-model");
+      assert.equal(job.resolvedThinking, "high");
+
+      await handlers.agent_start?.({}, ctx);
+      entries.push(
+        { id: "assistant-1", type: "message", message: { role: "assistant", usage: usage(10, 2, 0.1) } },
+        { id: "tool-1", type: "message", message: { role: "toolResult", usage: usage(3, 0, 0.03) } },
+        { id: "compact-1", type: "compaction", usage: usage(5, 1, 0.05) },
+      );
+      await handlers.agent_end?.({ messages: [{ role: "assistant", content: "first" }] }, ctx);
+      await handlers.agent_settled?.({}, ctx);
+      let heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+      assert.equal(heartbeat.executionId, "exec-1");
+      assert.equal(heartbeat.usage.totalTokens, 21);
+      assert.equal(heartbeat.lifetimeUsage.totalTokens, 21);
+
+      await handlers.agent_start?.({}, ctx);
+      entries.push({ id: "assistant-2", type: "message", message: { role: "assistant", usage: usage(7, 4, 0.07) } });
+      await handlers.agent_end?.({ messages: [{ role: "assistant", content: "second" }] }, ctx);
+      await handlers.agent_settled?.({}, ctx);
+      heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+      assert.equal(heartbeat.usage.totalTokens, 11);
+      assert.equal(heartbeat.lifetimeUsage.totalTokens, 32);
+      const turns = JSON.parse(await readFile(join(root, "jobs", "child-1", "turns", "turns.json"), "utf8"));
+      assert.equal(turns.turns[1].executionId, "exec-1");
+      assert.equal(turns.turns[1].usage.totalTokens, 11);
+      assert.equal(turns.turns[1].lifetimeUsage.totalTokens, 32);
+      await handlers.session_shutdown?.({}, ctx);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shutdown and reload preserve an active run baseline across retries", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-active-reload-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  const makeUsage = (tokens: number) => ({ input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: tokens / 100, output: 0, cacheRead: 0, cacheWrite: 0, total: tokens / 100 } });
+  const entries: any[] = [{ id: "prior", type: "message", message: { role: "assistant", usage: makeUsage(100) } }];
+  const ctx = {
+    cwd: root, isIdle: () => true, shutdown() {}, ui: { notify() {} },
+    model: { provider: "test", id: "model" }, thinkingLevel: "low",
+    sessionManager: { getSessionFile: () => join(root, "session.jsonl"), getSessionId: () => "session-1", getEntries: () => entries },
+  };
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: false, idleTimeoutMs: 0, accountingVersion: 1, executionId: "exec-1" });
+    await withChildEnv(root, resultPath, async () => {
+      process.env.PI_TMUX_SUBAGENTS_EXECUTION_ID = "exec-1";
+      let handlers = loadBootstrapHandlers();
+      await handlers.session_start?.({ reason: "startup" }, ctx);
+      await handlers.agent_start?.({}, ctx);
+      entries.push({ id: "spent-before-reload", type: "message", message: { role: "assistant", usage: makeUsage(20) } });
+      await handlers.turn_end?.({}, ctx);
+      await handlers.session_shutdown?.({ reason: "reload" }, ctx);
+
+      handlers = loadBootstrapHandlers();
+      await handlers.session_start?.({ reason: "reload" }, ctx);
+      let heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+      assert.equal(heartbeat.runActive, true);
+      assert.equal(heartbeat.runUsageBaseline.totalTokens, 100);
+      assert.equal(heartbeat.lifetimeUsage.totalTokens, 120, "reload recomputes newer persisted totals");
+      await handlers.agent_start?.({}, ctx);
+      await handlers.agent_start?.({}, ctx); // automatic retry must not reset the logical-run baseline
+      entries.push({ id: "spent-after-reload", type: "message", message: { role: "assistant", usage: makeUsage(10) } });
+      await handlers.agent_end?.({ messages: [{ role: "assistant", content: "done" }] }, ctx);
+      await handlers.agent_settled?.({}, ctx);
+      heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+      assert.equal(heartbeat.usage.totalTokens, 30);
+      assert.equal(heartbeat.lifetimeUsage.totalTokens, 130);
+      assert.equal(heartbeat.runActive, false);
+      await handlers.session_shutdown?.({}, ctx);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stale child execution cannot publish turn or result files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-stale-turn-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  const ctx = {
+    cwd: root, isIdle: () => true, shutdown() {}, ui: { notify() {} },
+    sessionManager: { getSessionFile: () => join(root, "session.jsonl"), getSessionId: () => "session-1", getEntries: () => [] },
+  };
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: false, accountingVersion: 1, executionId: "exec-1" });
+    await withChildEnv(root, resultPath, async () => {
+      process.env.PI_TMUX_SUBAGENTS_EXECUTION_ID = "exec-1";
+      const handlers = loadBootstrapHandlers();
+      await handlers.session_start?.({ reason: "startup" }, ctx);
+      await handlers.agent_start?.({}, ctx);
+      await handlers.agent_end?.({ messages: [{ role: "assistant", content: "stale result" }] }, ctx);
+      const registry = JSON.parse(await readFile(join(root, "jobs.json"), "utf8"));
+      registry.jobs[0].executionId = "exec-2";
+      await writeFile(join(root, "jobs.json"), JSON.stringify(registry), "utf8");
+      await assert.rejects(handlers.agent_settled?.({}, ctx), /Stale subagent execution/);
+      await assert.rejects(readFile(resultPath, "utf8"), { code: "ENOENT" });
+      await assert.rejects(readFile(join(root, "jobs", "child-1", "turns", "turns.json"), "utf8"), { code: "ENOENT" });
+      await handlers.session_shutdown?.({}, ctx).catch(() => {});
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a new execution does not restore the previous execution idle deadline", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-new-execution-idle-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  t.mock.method(Date, "now", () => 10_000);
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: false, idleTimeoutMs: 100, accountingVersion: 1, executionId: "exec-new" });
+    await mkdir(join(root, "jobs", "child-1"), { recursive: true });
+    await writeFile(join(root, "jobs", "child-1", "heartbeat.json"), JSON.stringify({ jobId: "child-1", executionId: "exec-old", state: "waiting", stateSince: 1, updatedAt: 1, idleSince: 1, runActive: false }), "utf8");
+    await withChildEnv(root, resultPath, async () => {
+      process.env.PI_TMUX_SUBAGENTS_EXECUTION_ID = "exec-new";
+      const handlers = loadBootstrapHandlers();
+      let shutdowns = 0;
+      const ctx = {
+        cwd: root, isIdle: () => true, shutdown() { shutdowns++; }, ui: { notify() {} },
+        sessionManager: { getSessionFile: () => join(root, "session.jsonl"), getSessionId: () => "session-1", getEntries: () => [] },
+      };
+      await handlers.session_start?.({ reason: "startup" }, ctx);
+      const heartbeat = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+      assert.equal(heartbeat.idleSince, undefined);
+      assert.equal(shutdowns, 0);
+      await handlers.session_shutdown?.({}, ctx);
+    });
+  } finally {
+    t.mock.restoreAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stale child execution cannot publish heartbeat or session metadata", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-stale-execution-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  try {
+    await writeJobRegistry(root, { autoStopOnComplete: false, accountingVersion: 1, executionId: "current" });
+    await withChildEnv(root, resultPath, async () => {
+      process.env.PI_TMUX_SUBAGENTS_EXECUTION_ID = "stale";
+      const handlers = loadBootstrapHandlers();
+      const ctx = { cwd: root, isIdle: () => true, sessionManager: { getEntries: () => [], getSessionFile: () => "/tmp/stale", getSessionId: () => "stale" } };
+      await assert.rejects(handlers.session_start?.({ reason: "startup" }, ctx), /Stale subagent execution/);
+      await handlers.session_shutdown?.({}, ctx).catch(() => {});
+      const job = JSON.parse(await readFile(join(root, "jobs.json"), "utf8")).jobs[0];
+      assert.equal(job.sessionId, undefined);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("child bootstrap records assistant usage on completed turns and heartbeats", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-usage-test-"));
   const resultPath = join(root, "jobs", "child-1", "result.md");
@@ -669,7 +845,7 @@ test("child bootstrap mirrors heartbeats to pi-agent-hub when configured", async
 
 async function writeJobRegistry(
   root: string,
-  policy: { autoStopOnComplete: boolean; idleTimeoutMs?: number },
+  policy: { autoStopOnComplete: boolean; idleTimeoutMs?: number; accountingVersion?: 1; executionId?: string },
   extraJobs: Array<{ id: string; parentId: string; tmuxSession: string }> = [],
 ): Promise<void> {
   await mkdir(root, { recursive: true });
@@ -696,9 +872,10 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   assert.fail("timed out waiting for condition");
 }
 
-function loadBootstrapHandlers(): Record<string, Function> {
+function loadBootstrapHandlers(thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" = "low"): Record<string, Function> {
   const handlers: Record<string, Function> = {};
   childBootstrap({
+    getThinkingLevel: () => thinkingLevel,
     on(event: string, handler: Function) {
       handlers[event] = handler;
     },
@@ -711,6 +888,7 @@ async function withChildEnv(root: string, resultPath: string, fn: () => Promise<
   const keys = [
     "PI_TMUX_SUBAGENTS_JOB_ID",
     "PI_TMUX_SUBAGENTS_DIR",
+    "PI_TMUX_SUBAGENTS_EXECUTION_ID",
     "PI_SUBAGENT_RESULT_PATH",
     "PI_AGENT_HUB_DIR",
     "PI_AGENT_HUB_SESSION_ID",

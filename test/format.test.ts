@@ -31,6 +31,15 @@ function status(overrides: Partial<SubagentStatusResult> = {}): SubagentStatusRe
   };
 }
 
+test("agent status offers explicit resume only for a stopped child with saved identity", () => {
+  const child = status({ status: "stopped" });
+  assert.doesNotMatch(formatAgentStatus(child), /follow-up:.*resume/);
+  child.job = { ...child.job, sessionFile: "/saved/session.jsonl", sessionId: "saved", resolvedModel: "openai/model", resolvedThinking: "off" };
+  assert.match(formatAgentStatus(child), /follow-up:.*resume.*message/);
+  child.status = "waiting";
+  assert.doesNotMatch(formatAgentStatus(child), /follow-up:.*resume/);
+});
+
 test("formatStatus renders compact done summary with attach and output paths", () => {
   const output = formatStatus(status());
 
@@ -70,7 +79,7 @@ test("formatUserStatus renders lean active card without operational commands or 
     },
   }));
 
-  assert.match(output, /^tmux subagent scout-auth \(scout\)\n ⟳ running · 2m39s · activity 0s ago · 1\.4k out · \$0\.08/m);
+  assert.match(output, /^tmux subagent scout-auth \(scout\)\n ⟳ running · 2m39s · activity 0s ago · 1\.4k out · \$0\.08 · latest run/m);
   assert.doesNotMatch(output, /model:/);
   assert.doesNotMatch(output, /cleanup:/);
   assert.doesNotMatch(output, /18\.2k in/);
@@ -88,10 +97,20 @@ test("formatUserStatus renders lean terminal card with result basename", () => {
 
   assert.equal(output, [
     "tmux subagent scout",
-    " ✓ done · 2m39s · 3.5k out · $0",
+    " ✓ done · 2m39s · 3.5k out · $0 · latest run",
     "   ✓ result ready → 001-result.md",
   ].join("\n"));
   assert.doesNotMatch(output, /\/tmp\/jobs/);
+});
+
+test("formatAgentStatus uses a lightweight confirmed result path", () => {
+  const output = formatAgentStatus(status({
+    result: undefined,
+    resultPath: "/tmp/jobs/child-123/turns/002-result.md",
+  }));
+
+  assert.match(output, /result ready → 002-result\.md/);
+  assert.match(output, /read: \/tmp\/jobs\/child-123\/turns\/002-result\.md/);
 });
 
 test("formatAgentStatus adds model-visible result read hints", () => {
@@ -125,12 +144,23 @@ test("formatSubagentFooterStatus and widget render live observability summary", 
     usage: { input: 16_700, output: 912, cacheRead: 0, cacheWrite: 0, totalTokens: 17_612, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.02 } },
   });
 
-  assert.equal(formatSubagentFooterStatus([running, idle]), "subagents: 1 running · 1 idle · $0.03");
+  assert.equal(formatSubagentFooterStatus([running, idle]), "subagents: 1 running · 1 idle · $0.03 latest-run usage");
   assert.deepEqual(formatSubagentWidget([running, idle]), [
     "tmux subagents",
-    "⟳ scout-render  running  2m39s  0s ago  9.2k/1.1k  $0.01",
-    "✓ scout-cost    idle     2m39s  —       16.7k/912  $0.02",
+    "⟳ scout-render  running  2m39s  0s ago  9.2k/1.1k  $0.01 · latest run",
+    "✓ scout-cost    idle     2m39s  —       16.7k/912  $0.02 · latest run",
   ]);
+});
+
+test("usage output distinguishes lifetime, latest-run, and mixed totals", () => {
+  const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 120, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.03 } };
+  const lifetime = status({ usage, usageScope: "lifetime" });
+  const latest = status({ job: { ...status().job, id: "latest" }, usage });
+
+  assert.match(formatUserStatus(lifetime), /20 out · \$0\.03 · lifetime/);
+  assert.match(formatUserStatus(latest), /20 out · \$0\.03 · latest run/);
+  assert.match(formatSubagentFooterStatus([lifetime, latest]) ?? "", /\$0\.06 mixed usage/);
+  assert.match(formatSubagentFooterStatus([lifetime, status({ job: { ...status().job, id: "missing" }, result: "", usage: undefined })]) ?? "", /\$0\.03 partial lifetime usage/);
 });
 
 test("formatStatus shows auto-stopped completion without manual stop hint", () => {

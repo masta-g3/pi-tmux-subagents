@@ -14,6 +14,7 @@ export interface SubagentsViewHooks {
   requestRender(): void;
   refreshNow(): Promise<void>;
   finish(action: SubagentsViewAction | undefined): void;
+  readResult?(row: SubagentViewRow): Promise<string | undefined>;
 }
 
 export interface SubagentsViewOptions {
@@ -67,8 +68,8 @@ function resultText(row: SubagentViewRow): string | undefined {
   return row.status.latestResult ?? row.status.result;
 }
 
-function resultExcerpt(row: SubagentViewRow, width: number): { lines: string[]; omitted: boolean } {
-  const raw = resultText(row)?.replace(/\r\n?/g, "\n");
+function resultExcerpt(text: string | undefined, width: number): { lines: string[]; omitted: boolean } {
+  const raw = text?.replace(/\r\n?/g, "\n");
   if (!raw) return { lines: ["No result text captured."], omitted: false };
   const cleaned = cleanText(raw, SUBAGENT_UI.resultExcerptChars);
   if (!cleaned) return { lines: ["No result text captured."], omitted: false };
@@ -89,6 +90,10 @@ export class SubagentsViewComponent {
   private confirmStopFor: string | undefined;
   private refreshing = false;
   private refreshError: string | undefined;
+  private expandedResult: string | undefined;
+  private resultLoading = false;
+  private resultError: string | undefined;
+  private resultRequest = 0;
 
   constructor(rows: SubagentViewRow[], private theme: Theme, private hooks: SubagentsViewHooks, private options: SubagentsViewOptions = {}) {
     this.rows = sortSubagentRows(rows);
@@ -103,6 +108,7 @@ export class SubagentsViewComponent {
   updateRows(nextRows: SubagentViewRow[]) {
     const previousRows = this.visibleRows();
     const previous = previousRows[this.selected];
+    const previousVersion = previous ? this.resultVersion(previous) : undefined;
     const previousIndex = this.selected;
     this.rows = sortSubagentRows(nextRows);
     const visible = this.visibleRows();
@@ -114,14 +120,15 @@ export class SubagentsViewComponent {
         ? sameGroup.reduce((best, item) => Math.abs(item.index - previousIndex) < Math.abs(best.index - previousIndex) ? item : best).index
         : Math.min(previousIndex, Math.max(0, visible.length - 1));
     } else this.selected = 0;
-    if (this.expandedFor && !visible.some((row) => row.id === this.expandedFor!.id)) this.expandedFor = undefined;
+    const selected = visible[this.selected];
+    if (this.expandedFor && (!selected || this.expandedFor.id !== selected.id || previousVersion !== this.resultVersion(selected))) this.clearExpansion();
     this.hooks.requestRender();
   }
 
   handleInput(data: string) {
     const row = this.selectedRow();
     if (this.confirmStopFor) {
-      if (data.toLowerCase() === "y") this.hooks.finish({ type: "stop", id: this.confirmStopFor, confirmed: true });
+      if (data.toLowerCase() === "y") this.finish({ type: "stop", id: this.confirmStopFor, confirmed: true });
       else if (data.toLowerCase() === "n" || matchesKey(data, Key.escape) || data === "\u0003") {
         this.confirmStopFor = undefined;
         this.hooks.requestRender();
@@ -131,21 +138,25 @@ export class SubagentsViewComponent {
 
     if (matchesKey(data, Key.up)) {
       this.selected = Math.max(0, this.selected - 1);
-      this.expandedFor = undefined;
+      this.clearExpansion();
       this.hooks.requestRender();
     } else if (matchesKey(data, Key.down)) {
       this.selected = Math.min(Math.max(0, this.visibleRows().length - 1), this.selected + 1);
-      this.expandedFor = undefined;
+      this.clearExpansion();
       this.hooks.requestRender();
-    } else if (matchesKey(data, Key.escape) || data === "\u0003") this.hooks.finish({ type: "close" });
+    } else if (matchesKey(data, Key.escape) || data === "\u0003") {
+      this.finish({ type: "close" });
+    }
     else if (matchesKey(data, Key.enter) && row) this.primaryAction(row);
     else if (data === "d" && row) {
-      this.expandedFor = this.expandedFor?.id === row.id ? undefined : { id: row.id, kind: "details" };
+      const wasExpanded = this.expandedFor?.id === row.id;
+      this.clearExpansion();
+      if (!wasExpanded) this.expandedFor = { id: row.id, kind: "details" };
       this.hooks.requestRender();
     }
-    else if (data === "r" && row?.canReply) this.hooks.finish({ type: "reply", id: row.id });
-    else if (data === "a" && row?.canAttach) this.hooks.finish({ type: "attach", id: row.id });
-    else if (data === "o" && row?.resultFile) this.hooks.finish({ type: "result", id: row.id });
+    else if (data === "r" && row?.canReply) this.finish({ type: "reply", id: row.id });
+    else if (data === "a" && row?.canAttach) this.finish({ type: "attach", id: row.id });
+    else if (data === "o" && row?.resultFile) this.finish({ type: "result", id: row.id });
     else if (data === "s" && row?.canStop) this.stopOrConfirm(row);
     else if (data === "R") void this.refresh();
   }
@@ -214,11 +225,50 @@ export class SubagentsViewComponent {
 
   private primaryAction(row: SubagentViewRow) {
     if (row.primaryAction === "reply") {
-      this.hooks.finish({ type: "reply", id: row.id });
+      this.finish({ type: "reply", id: row.id });
       return;
     }
     const kind = row.primaryAction === "result" ? "result" : "details";
-    this.expandedFor = this.expandedFor?.id === row.id && this.expandedFor.kind === kind ? undefined : { id: row.id, kind };
+    if (this.expandedFor?.id === row.id && this.expandedFor.kind === kind) {
+      this.clearExpansion();
+    } else {
+      this.clearExpansion();
+      this.expandedFor = { id: row.id, kind };
+      if (kind === "result" && this.hooks.readResult) void this.loadResult(row);
+    }
+    this.hooks.requestRender();
+  }
+
+  private clearExpansion() {
+    this.expandedFor = undefined;
+    this.expandedResult = undefined;
+    this.resultLoading = false;
+    this.resultError = undefined;
+    this.resultRequest += 1;
+  }
+
+  private finish(action: SubagentsViewAction) {
+    this.clearExpansion();
+    this.hooks.finish(action);
+  }
+
+  private resultVersion(row: SubagentViewRow): string {
+    return [row.status.job.executionId ?? "", row.status.latestTurn?.index ?? "", row.status.resultPath ?? row.status.latestTurn?.resultPath ?? row.status.job.resultPath].join(":");
+  }
+
+  private async loadResult(row: SubagentViewRow) {
+    const request = ++this.resultRequest;
+    this.resultLoading = true;
+    this.hooks.requestRender();
+    try {
+      const result = await this.hooks.readResult!(row);
+      if (request !== this.resultRequest || this.expandedFor?.id !== row.id || this.expandedFor.kind !== "result") return;
+      this.expandedResult = result;
+    } catch (error) {
+      if (request !== this.resultRequest || this.expandedFor?.id !== row.id || this.expandedFor.kind !== "result") return;
+      this.resultError = error instanceof Error ? error.message : String(error);
+    }
+    this.resultLoading = false;
     this.hooks.requestRender();
   }
 
@@ -228,7 +278,7 @@ export class SubagentsViewComponent {
       this.hooks.requestRender();
       return;
     }
-    this.hooks.finish({ type: "stop", id: row.id });
+    this.finish({ type: "stop", id: row.id });
   }
 
   private async refresh() {
@@ -274,9 +324,12 @@ export class SubagentsViewComponent {
       rowToken(row) ? fg(this.theme, rowToken(row)!, row.detail) : row.detail,
     ];
     if (expanded === "result") {
-      const excerpt = resultExcerpt(row, Math.max(8, width - 2));
+      const text = this.hooks.readResult ? this.expandedResult : resultText(row);
+      const excerpt = resultExcerpt(text, Math.max(8, width - 2));
       lines.push(fg(this.theme, SUBAGENT_UI.theme.secondary, `result  ${row.resultFile ?? "result"}${excerpt.omitted ? " · excerpt" : ""}`));
-      lines.push(...excerpt.lines.map((line) => `  ${line}`));
+      if (this.resultLoading) lines.push("  Loading result…");
+      else if (this.resultError) lines.push(`  Result unavailable: ${cleanText(this.resultError, 120) ?? "unknown error"}`);
+      else lines.push(...excerpt.lines.map((line) => `  ${line}`));
     } else if (expanded === "details") {
       const task = cleanText(row.status.job.taskPreview);
       if (task) lines.push(`task  ${task}`);
@@ -322,12 +375,14 @@ export class SubagentsViewComponent {
   }
 
   private totalCost(): string | undefined {
-    const costs = this.rows.map((row) => row.cost).filter((cost): cost is number => cost !== undefined);
-    if (!costs.length) return undefined;
-    const total = costs.reduce((sum, cost) => sum + cost, 0);
-    if (total === 0) return "$0";
-    if (total < 0.01) return `$${total.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
-    return `$${total.toFixed(2)}`;
+    const withCost = this.rows.filter((row) => row.cost !== undefined);
+    if (!withCost.length) return undefined;
+    const total = withCost.reduce((sum, row) => sum + row.cost!, 0);
+    const cost = total === 0 ? "$0" : total < 0.01 ? `$${total.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}` : `$${total.toFixed(2)}`;
+    const scopes = new Set(withCost.map((row) => row.usageScope));
+    const scope = scopes.size === 1 ? withCost[0]?.usageScope : undefined;
+    const label = scope === "lifetime" ? "lifetime usage" : scope === "latest-run" ? "latest-run usage" : "mixed usage";
+    return `${cost} ${withCost.length < this.rows.length ? `partial ${label}` : label}`;
   }
 }
 

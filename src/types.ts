@@ -43,6 +43,17 @@ export interface TmuxSubagentUsage {
 
 export interface TmuxSubagentJob {
   id: string;
+  /** New jobs use persisted-session lifetime accounting. Absence preserves legacy latest-run semantics. */
+  accountingVersion?: 1;
+  executionId?: string;
+  launchPending?: boolean;
+  sessionFile?: string;
+  sessionId?: string;
+  /** Exact provider/model pair selected by Pi, for example `anthropic/claude-sonnet-4`. */
+  resolvedModel?: string;
+  resolvedThinking?: ThinkingLevel;
+  depth?: number;
+  hubDir?: string;
   agentName: string;
   displayName?: string;
   taskPreview: string;
@@ -78,6 +89,7 @@ export interface TmuxSubagentAttention {
 
 export interface TmuxSubagentHeartbeat {
   jobId: string;
+  executionId?: string;
   cwd: string;
   state: "starting" | "running" | "waiting" | "error" | "shutdown";
   stateSince: number;
@@ -85,18 +97,27 @@ export interface TmuxSubagentHeartbeat {
   updatedAt: number;
   seenRunning?: boolean;
   idleSince?: number;
+  /** Latest logical run. Legacy readers continue to use this field. */
   usage?: TmuxSubagentUsage;
+  /** All persisted usage in the exact Pi session. */
+  lifetimeUsage?: TmuxSubagentUsage;
+  /** Persisted lifetime total at the start of the active/latest logical run. */
+  runUsageBaseline?: TmuxSubagentUsage;
+  /** True while retries/continuations still belong to one logical user run. */
+  runActive?: boolean;
   attention?: TmuxSubagentAttention;
 }
 
 export interface TmuxSubagentTurn {
   index: number;
+  executionId?: string;
   status: "running" | "waiting" | "error";
   startedAt: number;
   completedAt?: number;
   resultPath: string;
   messagePreview?: string;
   usage?: TmuxSubagentUsage;
+  lifetimeUsage?: TmuxSubagentUsage;
 }
 
 export interface TmuxSubagentTurnsRegistry {
@@ -109,9 +130,12 @@ export interface SubagentStatusResult {
   status: TmuxSubagentStatus;
   heartbeat?: TmuxSubagentHeartbeat;
   result?: string;
+  /** Confirmed result availability without hydrating the result body. */
+  resultPath?: string;
   latestResult?: string;
   latestTurn?: TmuxSubagentTurn;
   preview?: string;
   autoStopped?: boolean;
   usage?: TmuxSubagentUsage;
+  usageScope?: "lifetime" | "latest-run";
 }

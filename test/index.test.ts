@@ -79,6 +79,20 @@ function isolatePiStateEnv(agentDir: string): () => void {
   };
 }
 
+test("resume tool requires identity and message and rejects launch overrides", async () => {
+  let tool: any;
+  extension({ on() {}, registerTool(value: any) { tool = value; } } as any);
+  assert.ok(tool.parameters.properties.action.enum.includes("resume"));
+  for (const [params, expected] of [
+    [{ action: "resume", message: "Next" }, /childId/],
+    [{ action: "resume", childId: "id" }, /message/],
+    [{ action: "resume", childId: "id", message: "Next", model: "different" }, /override|launch-only/],
+  ] as const) {
+    const result = await tool.execute("test", params);
+    assert.match(result.content[0].text, expected);
+  }
+});
+
 test("background refresh reports UI failures instead of rejecting unhandled", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-poll-error-test-"));
   const restorePiEnv = isolatePiStateEnv(join(root, "agent"));
@@ -159,9 +173,9 @@ test("tmux_subagent uses canonical parent status and widget keys", async () => {
   }
 });
 
-function launchHistory(id: string) {
+function launchHistory(id: string, resumed = false) {
   return { getEntries: () => [
-    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "launch", name: "tmux_subagent", arguments: { agent: "scout", task: "Task" } }] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "launch", name: "tmux_subagent", arguments: resumed ? { action: "resume", childId: id, message: "Next" } : { agent: "scout", task: "Task" } }] } },
     { type: "message", message: { role: "toolResult", toolName: "tmux_subagent", toolCallId: "launch", details: { id } } },
   ] };
 }
@@ -859,13 +873,16 @@ test("parent polling observes finite idle lifetimes without closing children", a
       const job = { id: "idle-child", agentName: "scout", taskPreview: "Done", cwd: root, tmuxSession, status: savedStatus ?? "waiting", resultPath: join(jobDir, "result.md"), createdAt: now, updatedAt: now, ...policy };
       writeFileSync(join(state, "jobs.json"), JSON.stringify({ version: 1, jobs: [job] }));
       writeFileSync(join(jobDir, "heartbeat.json"), JSON.stringify({ state: heartbeatState, seenRunning: true, updatedAt: now }));
-      await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory(job.id) });
-      assert.equal(polls, expectedPolls, "reload must restore live children despite a saved stopped status");
-      const result = await tool.execute("status", { action: "status", childId: job.id });
-      assert.equal(result.details.status, expectedStatus);
-      assert.equal(polls, expectedPolls);
-      execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" });
-      await handlersShutdown(handlers);
+      for (const resumed of [false, true]) {
+        polls = 0;
+        await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory(job.id, resumed) });
+        assert.equal(polls, expectedPolls, "reload must restore launched and resumed children despite a saved stopped status");
+        const result = await tool.execute("status", { action: "status", childId: job.id });
+        assert.equal(result.details.status, expectedStatus);
+        assert.equal(polls, expectedPolls);
+        execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" });
+        await handlersShutdown(handlers);
+      }
     }
   } finally {
     await handlersShutdown(handlers);
@@ -917,8 +934,8 @@ test("tmux_subagent exposes persistent send and wait actions", () => {
   assert.equal(tool.parameters.properties.includeStopped.type, "boolean");
   assert.match(tool.parameters.properties.includeStopped.description, /historical/);
   assert.equal(tool.parameters.properties.timeoutMs.type, "number");
-  assert.match(tool.description, /Prefer background launches/);
-  assert.match(tool.parameters.properties.wait.description, /Prefer false/);
+  assert.match(tool.description, /Prefer background work/);
+  assert.match(tool.parameters.properties.wait.description, /Default false/);
   assert.match(tool.parameters.properties.childId.description, /omit to return when any active child completes/);
 });
 
@@ -949,7 +966,7 @@ test("tmux_subagent launch applies model and lifetime overrides", async () => {
     assert.equal(result.details.model, "openai-codex/gpt-5.6-sol");
     assert.equal(result.details.idleTimeoutMs, 1234);
     assert.equal(result.details.autoStopOnComplete, false);
-    assert.match(readFileSync(logPath, "utf8"), /'--model' 'openai-codex\/gpt-5\.6-sol:medium'/);
+    assert.match(readFileSync(logPath, "utf8"), /'--model' 'openai-codex\/gpt-5\.6-sol' '--thinking' 'medium'/);
   } finally {
     await handlersShutdown(handlers);
     restorePiEnv();
@@ -1077,7 +1094,7 @@ test("tmux_subagent renders status with active theme tokens", () => {
   }, { expanded: false, isPartial: true }, theme, {}).render(120).join("\n");
 
   assert.match(rendered, /^<muted>tmux subagent plan-critic<\/muted>/);
-  assert.match(rendered, /<warning>⟳<\/warning> <muted>running · 0s · activity 0s ago · 300 out · \$0\.006<\/muted>/);
+  assert.match(rendered, /<warning>⟳<\/warning> <muted>running · 0s · activity 0s ago · 300 out · \$0\.006 · latest run<\/muted>/);
   assert.doesNotMatch(rendered, /<dim>model:<\/dim>/);
   assert.doesNotMatch(rendered, /1\.2k in/);
   assert.doesNotMatch(rendered, /Pane preview/);
@@ -1171,6 +1188,12 @@ test("tmux_subagent rejects nested child management for jobs it did not launch",
     let tool: any;
     extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
 
+    const before = readFileSync(join(state, "jobs.json"), "utf8");
+    const resume = await tool.execute("call", { action: "resume", childId: "parent-job", message: "Take over" }, undefined, undefined, { cwd: root });
+    assert.equal(resume.isError, true);
+    assert.match(resume.content[0].text, /only their own allowed jobs/);
+    assert.equal(readFileSync(join(state, "jobs.json"), "utf8"), before, "resume authorization must precede state changes");
+
     const result = await tool.execute("call", { action: "status", childId: "parent-job" }, undefined, undefined, { cwd: root });
 
     assert.equal(result.isError, true);
@@ -1180,6 +1203,30 @@ test("tmux_subagent rejects nested child management for jobs it did not launch",
     if (oldDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
     else process.env.PI_SUBAGENT_DEPTH = oldDepth;
   }
+});
+
+test("nested resume enforces owner, agent allowlist and depth before changing state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-nested-resume-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  mkdirSync(state, { recursive: true });
+  const restore = isolatePiStateEnv(agentDir);
+  process.env.PI_SUBAGENT_DEPTH = "1";
+  process.env.PI_TMUX_SUBAGENTS_JOB_ID = "owner";
+  process.env.PI_TMUX_SUBAGENTS_NESTED_ALLOWLIST = "worker";
+  process.env.PI_TMUX_SUBAGENTS_MAX_NESTED_DEPTH = "2";
+  try {
+    let tool: any;
+    extension({ registerTool(value: any) { tool = value; }, on() {} } as any);
+    for (const [parentId, agentName, depth] of [["someone-else", "worker", "1"], ["owner", "disallowed", "1"], ["owner", "worker", "2"]]) {
+      process.env.PI_SUBAGENT_DEPTH = depth;
+      const saved = JSON.stringify({ version: 1, jobs: [{ id: "target", parentId, agentName, status: "stopped" }] });
+      writeFileSync(join(state, "jobs.json"), saved);
+      const result = await tool.execute("test", { action: "resume", childId: "target", message: "Next" });
+      assert.match(result.content[0].text, /only their own allowed jobs within the depth limit/);
+      assert.equal(readFileSync(join(state, "jobs.json"), "utf8"), saved);
+    }
+  } finally { restore(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("tmux_subagent rejects nested launches when not enabled", async () => {
