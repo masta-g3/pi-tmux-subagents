@@ -44,6 +44,7 @@ type ToolParams = {
 type PiContext = {
   cwd: string;
   mode?: string;
+  sessionManager?: Pick<ExtensionContext["sessionManager"], "getEntries">;
   ui?: {
     theme?: { fg?: (token: any, text: string) => string; bg?: (token: any, text: string) => string; bold?: (text: string) => string };
     setStatus?: (key: string, text: string | undefined) => void;
@@ -59,6 +60,7 @@ type PiContext = {
 const RECENT_STOPPED_STATUS_LIMIT = 5;
 const PACKAGE_NAME = "pi-tmux-subagents";
 const activeJobs = new Map<string, SubagentStatusResult>();
+const sessionJobIds = new Set<string>();
 let setStatus: ((text: string | undefined) => void) | undefined;
 let setWidget: ((rows: SubagentViewRow[] | undefined) => void) | undefined;
 let notify: NonNullable<PiContext["ui"]>["notify"];
@@ -247,6 +249,7 @@ async function refreshSummaryCacheFor(statuses: SubagentStatusResult[]) {
 }
 
 function trackStatus(status: SubagentStatusResult) {
+  if (!sessionJobIds.has(status.job.id)) return;
   rememberCompletion(status);
   activeJobs.set(status.job.id, status);
   refreshParentStatus();
@@ -302,13 +305,14 @@ function formatJobSummary(job: TmuxSubagentJob): string {
   return `${job.id.slice(0, 12)} ${job.status} ${jobDisplayName(job).replace(/\s+/g, " ").slice(0, 80)}: ${job.taskPreview.replace(/\s+/g, " ").slice(0, 160)}`;
 }
 
-function selectStatusJobs(jobs: TmuxSubagentJob[], includeStopped: boolean): { jobs: TmuxSubagentJob[]; hiddenStopped: number } {
+function selectStatusJobs(jobs: TmuxSubagentJob[], includeStopped: boolean, preferredIds?: ReadonlySet<string>): { jobs: TmuxSubagentJob[]; hiddenStopped: number } {
   const priority = { starting: 0, running: 0, waiting: 1, error: 2, stopped: 3 };
   const sorted = [...jobs].sort((a, b) => priority[a.status] - priority[b.status] || compareRecentJobs(a, b));
   if (includeStopped) return { jobs: sorted, hiddenStopped: 0 };
 
   const active = sorted.filter((job) => job.status !== "stopped");
   const stopped = sorted.filter((job) => job.status === "stopped");
+  if (preferredIds) stopped.sort((a, b) => Number(preferredIds.has(b.id)) - Number(preferredIds.has(a.id)));
   const recentStopped = stopped.slice(0, RECENT_STOPPED_STATUS_LIMIT);
   return { jobs: [...active, ...recentStopped], hiddenStopped: stopped.length - recentStopped.length };
 }
@@ -525,7 +529,7 @@ function refreshSubagentSnapshot(root: string, scope: RefreshScope): Promise<Sub
   const generation = refreshGeneration;
   const run = async (): Promise<SubagentSnapshot> => {
     const jobs = scope === "manager"
-      ? selectStatusJobs((await loadJobs(root)).jobs, false).jobs
+      ? selectStatusJobs((await loadJobs(root)).jobs, false, sessionJobIds).jobs
       : [...activeJobs.values()].map((status) => status.job);
     const ids = [...new Set(jobs.map((job) => job.id))];
     const refreshed = await Promise.all(ids.map((id) => getSubagentStatus(root, id).catch(() => undefined)));
@@ -535,10 +539,11 @@ function refreshSubagentSnapshot(root: string, scope: RefreshScope): Promise<Sub
 
     if (generation === refreshGeneration) {
       for (const status of statuses) {
+        if (!sessionJobIds.has(status.job.id)) continue;
         rememberCompletion(status);
         activeJobs.set(status.job.id, status);
       }
-      summaryCache = summaries;
+      summaryCache = new Map([...summaries].filter(([id]) => sessionJobIds.has(id)));
       scheduleSummaryExpiryRefresh();
       refreshParentStatus();
       pollRoot = root;
@@ -582,7 +587,8 @@ async function handleSubagentsAction(action: SubagentsViewAction | undefined, ro
     return true;
   }
   if (action.type === "reply") {
-    const message = await ctx.ui?.input?.(`Reply to ${status.job.displayName ?? status.job.agentName}`);
+    const verb = status.heartbeat?.attention ? "Answer" : "Send task to";
+    const message = await ctx.ui?.input?.(`${verb} ${status.job.displayName ?? status.job.agentName}`);
     if (!message) return true;
     await sendSubagentAttentionReply(root, status.job.id, message);
     ctx.ui?.notify?.(`Sent reply to ${status.job.id}.`, "info");
@@ -621,7 +627,7 @@ async function openSubagentsView(root: string, ctx: PiContext) {
             finish: done as (value: SubagentsViewAction | undefined) => void,
             requestRender: () => tui.requestRender?.(),
             refreshNow: refresh,
-          }, { selectedId });
+          }, { selectedId, sessionJobIds });
           const timer = setInterval(() => {
             void refresh().catch((error) => {
               clearInterval(timer);
@@ -732,6 +738,28 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     } : undefined;
     lastStatusText = "";
     lastWidgetText = "";
+    sessionJobIds.clear();
+    const launchCalls = new Set<string>();
+    for (const entry of ctx.sessionManager?.getEntries() ?? []) {
+      if (entry.type !== "message") continue;
+      const message = entry.message;
+      if (message.role === "assistant") {
+        for (const part of message.content) {
+          if (part.type === "toolCall" && part.name === "tmux_subagent" && !part.arguments.action && part.arguments.agent && part.arguments.task) launchCalls.add(part.id);
+        }
+      } else if (message.role === "toolResult" && message.toolName === "tmux_subagent" && launchCalls.has(message.toolCallId)) {
+        const details = message.details as TmuxSubagentJob | SubagentStatusResult | undefined;
+        const job = details && ("job" in details ? details.job : details);
+        if (job?.id) sessionJobIds.add(job.id);
+      }
+    }
+    if (sessionJobIds.size) {
+      const root = stateRoot();
+      const jobs = (await loadJobs(root)).jobs.filter((job) => sessionJobIds.has(job.id)
+        && (job.status !== "stopped" || (job.idleTimeoutMs !== undefined && !job.autoStopped)));
+      for (const job of jobs) activeJobs.set(job.id, { job, status: job.status });
+      await refreshSubagentSnapshot(root, "parent");
+    }
     refreshParentStatus();
   });
   pi.on("session_shutdown", async () => {
@@ -756,10 +784,11 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     retainedCompletions.clear();
     stopStatusPolling();
     activeJobs.clear();
+    sessionJobIds.clear();
   });
 
   pi.registerCommand?.("subagents", {
-    description: "Open the tmux subagent manager, browse the library, or run reply, stop, attach, result, and refresh actions",
+    description: "Manage subagents; use /subagents library to browse agent definitions",
     handler: async (args, ctx) => handleSubagentsSlashCommand(args, ctx as unknown as PiContext),
   });
 
@@ -931,6 +960,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         maxNestedDepth: params.maxNestedDepth,
         displayName: normalizeDisplayName(params.label),
       });
+      sessionJobIds.add(job.id);
       trackJob(job);
       if (params.background) {
         return reply([

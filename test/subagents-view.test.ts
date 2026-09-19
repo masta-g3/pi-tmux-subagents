@@ -27,7 +27,7 @@ function harness(statuses: SubagentStatusResult[], selectedId?: string) {
   return { component, actions, get renders() { return renders; }, get refreshes() { return refreshes; } };
 }
 
-test("manager renders wide groups, stable age rail, and contextual footer", () => {
+test("manager renders one list with explicit states and discoverable actions", () => {
   const question = status("question-child", { heartbeat: { ...status("question-child").heartbeat!, attention: { kind: "question", message: "Choose path", updatedAt: 10 } } });
   const idle = status("idle-child", {
     status: "waiting",
@@ -38,16 +38,18 @@ test("manager renders wide groups, stable age rail, and contextual footer", () =
   const output = component.render(120).join("\n");
 
   assert.match(output, /Subagents · 1 needs input · 1 running · 1 idle/);
-  assert.match(output, /Needs input  1/);
-  assert.match(output, /Running  1/);
-  assert.match(output, /Idle  1/);
-  assert.match(output, /question-child\s+Choose path\s+19s/);
-  assert.match(output, /enter reply/);
+  assert.doesNotMatch(output, /Needs input  1|Running  1|Idle  1|19s/);
+  assert.match(output, /Agent\s+Status\s+Activity/);
+  assert.match(output, /question-child\s+Needs input\s+Choose path/);
+  assert.match(output, /↑↓ select/);
+  assert.match(output, /enter answer question/);
+  assert.equal(output.split("question-child").length - 1, 1);
   assert.doesNotMatch(output, /p peek|• r reply|enter result\/attach/);
   const narrowLines = component.render(44);
   assert.match(narrowLines.slice(0, 2).join("\n"), /^Subagents\n3 jobs · 1 input/m);
-  const narrowFooter = narrowLines.at(-1) ?? "";
-  assert.match(narrowFooter, /enter reply/);
+  const narrowFooter = narrowLines.slice(-3).join("\n");
+  assert.match(narrowFooter, /enter answer question/);
+  assert.match(narrowLines.join("\n"), /Choose path/);
   assert.match(narrowFooter, /esc close/);
   assert.doesNotMatch(narrowFooter, /a attach|R refresh/);
 });
@@ -142,9 +144,40 @@ test("manager bounds history and every line at representative widths", () => {
     assert.match(lines.slice(-2).join("\n"), /esc close/);
   }
   const output = component.render(100).join("\n");
-  assert.match(output, /Done  5/);
+  assert.match(output, /Status/);
   assert.match(output, /\+2 more done/);
   assert.doesNotMatch(output, /done-6/);
+});
+
+test("idle agents offer a new task rather than a reply", () => {
+  const idle = status("idle", { status: "waiting", job: { ...status("idle").job, status: "waiting", autoStopOnComplete: false } });
+  const { component, actions } = harness([idle]);
+  assert.match(component.render(100).join("\n"), /enter send task/);
+  assert.doesNotMatch(component.render(100).join("\n"), /prepare attach/);
+  component.handleInput("d");
+  assert.match(component.render(100).join("\n"), /a prepare attach command/);
+  assert.match(component.render(100).join("\n"), /updated 19s ago/);
+  component.handleInput("d");
+  assert.doesNotMatch(component.render(100).join("\n"), /updated 19s ago/);
+  component.handleInput("\r");
+  assert.deepEqual(actions, [{ type: "reply", id: "idle" }]);
+});
+
+test("manager separates local launches from other jobs and selection follows displayed order", () => {
+  const local = status("local-idle", { status: "waiting", job: { ...status("local-idle").job, autoStopOnComplete: false } });
+  const rows = toSubagentViewRows([status("foreign-running"), local], { now: 20_000 });
+  const actions: unknown[] = [];
+  const component = createSubagentsView(rows, {}, { finish: (action) => actions.push(action), requestRender() {}, async refreshNow() {} }, { sessionJobIds: new Set([local.job.id]) });
+  const output = component.render(100).join("\n");
+  assert.ok(output.indexOf("This session") < output.indexOf("local-idle"));
+  assert.ok(output.indexOf("local-idle") < output.indexOf("Other sessions"));
+  assert.ok(output.indexOf("Other sessions") < output.indexOf("foreign-running"));
+  component.handleInput("\r");
+  assert.deepEqual(actions, [{ type: "reply", id: "local-idle" }]);
+  component.handleInput("\u001b[B");
+  component.handleInput("s");
+  component.handleInput("y");
+  assert.deepEqual(actions.at(-1), { type: "stop", id: "foreign-running", confirmed: true });
 });
 
 test("manager handles empty state", () => {

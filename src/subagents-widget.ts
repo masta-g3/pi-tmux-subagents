@@ -83,7 +83,11 @@ export class SubagentsWidgetComponent {
     const summary = safeWidth < SUBAGENT_UI.wideViewMin
       ? compactGroupCountSummary(ordered)
       : [groupCountSummary(ordered) || "no jobs", totalCost(ordered)].filter(Boolean).join(" · ");
-    const lines = [fg(this.theme, SUBAGENT_UI.theme.secondary, `subagents · ${summary}`)];
+    const title = "─ Subagents ";
+    const info = truncateToWidth(summary, Math.max(0, safeWidth - visibleWidth(title) - 4));
+    const right = info ? ` ${info} ─` : "";
+    const rule = "─".repeat(Math.max(0, safeWidth - visibleWidth(title) - visibleWidth(right)));
+    const lines = [fg(this.theme, SUBAGENT_UI.theme.secondary, `${title}${rule}${right}`)];
     lines.push(...visible.map((row) => renderRow(row, safeWidth, this.theme, this.now())));
     const hidden = ordered.length - visible.length;
     if (hidden > 0) lines.push(fg(this.theme, SUBAGENT_UI.theme.tertiary, `+${hidden} more · /subagents`));

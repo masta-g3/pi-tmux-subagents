@@ -28,7 +28,7 @@ npm test
 pi install "$PWD"
 ```
 
-Re-run `npm run build` after local changes, then reload or restart parent Pi sessions. If both `npm:pi-tmux-subagents` and a local-path install are enabled, the npm-installed copy self-disables so the local checkout can register `tmux_subagent` without a duplicate-tool conflict.
+Re-run `npm run build` after local changes, then run `/reload` or restart the parent Pi session. Reloading a child does not update the parent's widget or manager. If both `npm:pi-tmux-subagents` and a local-path install are enabled, the npm-installed copy self-disables so the local checkout can register `tmux_subagent` without a duplicate-tool conflict.
 
 ## Agent files
 
@@ -115,7 +115,7 @@ Global `action: "status"` returns at most 20 jobs by default (`limit`: 1–50), 
 
 `Subagent background refresh stopped` means automatic parent polling has stopped. Resolve the reported error, then use `/subagents refresh` to retry. A child reporting `Subagent heartbeat stopped` is no longer publishing periodic status; treat its displayed status as potentially stale until the file error is resolved and the child is relaunched.
 
-The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact, width-aware below-editor widget for active, errored, persistent-idle, attention-needed, or briefly retained completed children. Questions and errors sort first and receive semantic color; routine states stay neutral. Fresh Agent Hub `session-metadata/<child-id>.json` can provide compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`), with turn/result/task text as fallback. Ages continue updating even after active polling stops. The extension still never generates summaries, calls a model, scrapes panes, or persists raw prompts/output for summaries. Open the live interactive manager with `/subagents`, `/subagents view`, `alt+s`, or `ctrl+alt+s`; use `/subagents library` to browse available Markdown agents read-only.
+The user-facing surfaces are split by purpose. Tool cards stay lean and immutable in scrollback: they show one identity line, state, elapsed time, last activity for active children, compact real token/cost usage when Pi reports it, and a short result filename for terminal states. Full paths, model names, cleanup reminders, attach/stop commands, and pane previews stay in structured details/debug text for agents and inspection. The parent session publishes one compact, width-aware below-editor widget for active, errored, persistent-idle, attention-needed, or briefly retained completed children. Questions and errors sort first and receive semantic color; routine states stay neutral. Fresh Agent Hub `session-metadata/<child-id>.json` can provide compatible `pi-session-summary` fields (`goal`, `status`, `nextStep`, `stage`), with turn/result/task text as fallback. Ages continue updating even after active polling stops. The extension still never generates summaries, calls a model, scrapes panes, or persists raw prompts/output for summaries.
 
 Each successfully settled child run captures its final assistant message into a numbered result file under `jobs/<id>/turns/`, and `jobs/<id>/result.md` is updated to the latest result for compatibility with existing tooling. This control-plane capture is handled by the child bootstrap and does not require the agent to have project file write access. Terminal tool results keep the rendered card compact, but the model-visible text includes the absolute result path plus a ready-to-use `read({ path, limit: 2000 })` hint; idle children with indefinite or legacy lifetime policies also include a `stop` reminder.
 
@@ -129,40 +129,39 @@ tmux subagent scout
    ✓ result ready → 001-result.md
 ```
 
-While tracked subagents are active, errored, persistent-idle, or briefly retained after clean auto-stop, the parent session shows the ambient process ledger:
+The widget shows children launched by this Pi session, not every job on the machine. Reload restores ownership from recorded launch results, including launches on other branches of the same session. Inspecting or messaging another session's child does not add it to this widget. Cleanly stopped history does not reappear on reload.
+
+While this session's children are active, errored, persistent-idle, or briefly retained after clean auto-stop, the widget appears below the editor:
 
 ```text
-subagents · 1 needs input · 1 running · 1 idle · $0.04
+─ Subagents ────── 1 needs input · 1 running · 1 idle · $0.04 ─
 ✸ scout-auth   Choose auth migration path?                  2m
 ⟳ worker-ui    testing · Updating widget tests               8s
 ✓ scout-docs   result 001-result.md                           4m
 ```
 
-The widget caps visible rows and links to `/subagents` only when jobs are hidden. At narrow widths it gives identity and intervention text priority over age and usage. It hides while the manager is open so the same jobs are never rendered twice, then returns when the manager closes.
+The widget caps visible rows and links to `/subagents` only when jobs are hidden. Its ages show time since the row was updated, not total run time. At narrow widths it gives identity and intervention text priority over age and usage. It hides while the manager is open so the same jobs are never rendered twice, then returns when the manager closes.
 
-`/subagents` opens the live manager. It refreshes every three seconds, keeps selection by child ID when rows reorder, and also supports `R` for an immediate in-place refresh:
+`/subagents` is the main command. `/subagents view`, `alt+s`, and `ctrl+alt+s` open the same manager. It separates **This session** from **Other sessions / unassigned**; the latter includes jobs without a recorded launch in this session. Header counts cover both sections. This session's completions take priority in the limited history list.
 
 ```text
-Subagents · 1 needs input · 1 running · 1 idle · $0.04
-────────────────────────────────────────────────────────────
+Subagents · 1 running · 1 idle
+────────────────────────────────────────────────────────────────────────────────────────
 
-Needs input  1
-> ✸ scout-auth       Choose auth migration path?             2m
+  Agent                 Status       Activity
+This session
+> worker-ui             Running      Updating widget tests
+Other sessions / unassigned
+  scout-docs            Idle         Result ready
 
-Running  1
-  ⟳ worker-ui        testing · Updating widget tests         47s
-
-Idle  1
-  ✓ scout-docs       result 001-result.md                     4m
-
-────────────────────────────────────────────────────────────
-scout-auth · needs input · 2m
-Choose auth migration path?
-
-enter reply · s stop · a attach · R refresh · esc close
+↑↓ select · enter show details · s stop · esc close
 ```
 
-Enter follows the selected row's primary workflow: reply to needs-input or persistent-idle children, disclose details for running/error rows, and show a bounded sanitized result excerpt for completed rows. `o` exposes a result path on demand; stop remains guarded for running children.
+Use ↑↓ to select a child. Enter answers a question, sends a new task to an idle child, shows running/error details, or shows a completed result. The footer names the action before you press it. Use `d` for details when Enter offers an answer or task. At narrow widths, activity appears below the list for the selected child.
+
+Details expose secondary action hints: `o` shows the result path, and `a` prepares an attach command in the editor rather than opening the child. `s` stops the selected child after confirmation; `esc` closes the panel. Check the session heading before acting on a job from another session.
+
+The manager refreshes every three seconds and preserves the selected child when rows reorder. `R` refreshes immediately. `/subagents library` is a separate read-only browser of agent definitions.
 
 Related slash commands:
 

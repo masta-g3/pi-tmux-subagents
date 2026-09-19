@@ -42,7 +42,9 @@ test("ambient widget renders one compact routine row without mode chrome", () =>
   const widget = createSubagentsWidget(rows, plainTheme, () => 10_000);
   const output = widget.render(100).join("\n");
 
-  assert.match(output, /^subagents · 1 running/m);
+  assert.match(output, /^─ Subagents ─+ 1 running ─$/m);
+  assert.equal(visibleWidth(widget.render(100)[0]!), 100);
+  assert.equal(widget.render(100).length, 2);
   assert.match(output, /scout-auth\s+implementing · Updating widget tests\s+1s/);
   assert.doesNotMatch(output, /background|tree|details|peek|╰─|⎿/);
 });
@@ -77,10 +79,10 @@ test("ambient widget keeps every line within narrow and wide widths", () => {
   ], { now: 10_000 });
   const widget = createSubagentsWidget(rows, plainTheme, () => 10_000);
 
-  for (const width of [20, 44, 88, 120]) {
+  for (const width of [1, 10, 14, 20, 44, 88, 120]) {
     assert.ok(widget.render(width).every((line) => visibleWidth(line) <= width), `line exceeded ${width} columns`);
   }
-  assert.match(widget.render(44)[0] ?? "", /subagents · 2 jobs · 2 running/);
+  assert.match(widget.render(44)[0] ?? "", /^─ Subagents ─+ 2 jobs · 2 running ─$/);
   assert.match(widget.render(120).join("\n"), /\s1s$/m);
 });
 

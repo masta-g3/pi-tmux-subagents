@@ -103,7 +103,7 @@ test("background refresh reports UI failures instead of rejecting unhandled", as
     const heartbeat = { state: "running", seenRunning: true, updatedAt: now };
     writeFileSync(join(jobDir, "heartbeat.json"), JSON.stringify(heartbeat));
     extension({ on(name: string, handler: Function) { handlers.set(name, handler); }, registerTool(value: any) { tool = value; } } as any);
-    await handlers.get("session_start")?.({}, { cwd: root, ui: {
+    await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory(job.id), ui: {
       setStatus() {},
       setWidget() { if (failWidget) throw new Error("Widget unavailable"); },
       notify(message: string) { notices.push(message); },
@@ -159,6 +159,13 @@ test("tmux_subagent uses canonical parent status and widget keys", async () => {
   }
 });
 
+function launchHistory(id: string) {
+  return { getEntries: () => [
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "launch", name: "tmux_subagent", arguments: { agent: "scout", task: "Task" } }] } },
+    { type: "message", message: { role: "toolResult", toolName: "tmux_subagent", toolCallId: "launch", details: { id } } },
+  ] };
+}
+
 test("tmux_subagent retains auto-stopped completions briefly and then clears", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100_000 });
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-retention-test-"));
@@ -184,8 +191,9 @@ test("tmux_subagent retains auto-stopped completions briefly and then clears", a
       registerTool(def: any) { tool = def; },
       on(name: string, handler: Function) { handlers.set(name, handler); },
     } as any);
-    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]) } });
+    await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory(id), ui: { setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]) } });
 
+    assert.equal(widgets.at(-1)?.[1], undefined, "reload must not replay saved completions");
     await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
 
     assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-retained/);
@@ -229,7 +237,7 @@ test("tmux_subagent summary widget expires stale summaries while idle", async (t
       registerTool(def: any) { tool = def; },
       on(name: string, handler: Function) { handlers.set(name, handler); },
     } as any);
-    await handlers.get("session_start")?.({}, { cwd: root, ui: { setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]) } });
+    await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory(id), ui: { setWidget: (key: string, content: WidgetContent, options?: { placement?: string }) => widgets.push([key, content, options]) } });
 
     await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
     const fresh = await waitForWidget(widgets, (content) => /Fresh summary detail/.test(content?.join("\n") ?? ""));
@@ -447,7 +455,7 @@ test("tmux_subagent registers subagent manager command and shortcuts", () => {
   } as any);
 
   assert.equal(command.name, "subagents");
-  assert.match(command.description, /manager/);
+  assert.match(command.description, /Manage subagents/);
   assert.doesNotMatch(command.description, /details\s+widget|peek\s+mode/);
   assert.deepEqual(shortcuts.map((shortcut) => shortcut.key), ["alt+s", "ctrl+alt+s"]);
   assert.match(shortcuts[0].description, /Open.*manager/i);
@@ -501,7 +509,7 @@ test("subagents command and shortcuts open the manager while library stays separ
   }
 });
 
-test("subagents manager hides the ambient widget until the manager closes", async () => {
+test("subagents manager does not adopt unrelated jobs into the widget",  async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-manager-widget-test-"));
   const agentDir = join(root, "agent");
   const state = join(agentDir, "pi-tmux-subagents");
@@ -532,21 +540,70 @@ test("subagents manager hides the ambient widget until the manager closes", asyn
         assert.equal(widgets.at(-1)?.[1], undefined);
         const component = factory({ requestRender() {} }, {}, {}, () => undefined);
         assert.match(component.render(100).join("\n"), /scout-visible/);
+        assert.match(component.render(100).join("\n"), /Other sessions/);
         return { type: "close" };
       },
       notify() {},
     };
     await handlers.get("session_start")?.({}, { cwd: root, ui });
     await tool.execute("call", { action: "status", childId: id }, undefined, undefined, { cwd: root });
-    assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-visible/);
+    assert.equal(widgets.at(-1)?.[1], undefined);
 
     await command.handler("view", { cwd: root, ui });
+    await command.handler("refresh", { cwd: root, ui });
 
+    assert.equal(widgets.at(-1)?.[1], undefined);
+
+    await handlersShutdown(handlers);
+    await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory(id), ui });
     assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-visible/);
+    await command.handler("view", { cwd: root, ui: { ...ui, custom: async (factory: Function) => {
+      assert.equal(widgets.at(-1)?.[1], undefined);
+      const component = factory({ requestRender() {} }, {}, {}, () => undefined);
+      assert.match(component.render(100).join("\n"), /This session\n> scout-visible/);
+      return { type: "close" };
+    } } });
+    assert.match(renderWidget(widgets.at(-1)?.[1])?.join("\n") ?? "", /scout-visible/);
+    await handlersShutdown(handlers);
+    await handlers.get("session_start")?.({}, { cwd: root, ui });
+    assert.equal(widgets.at(-1)?.[1], undefined);
+    execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" });
   } finally {
     await handlersShutdown(handlers);
     killTmuxSession(tmuxSession);
     restorePiEnv();
+  }
+});
+
+test("manager reserves recent history slots for this session before other sessions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-manager-owned-history-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const restore = isolatePiStateEnv(agentDir);
+  const handlers = new Map<string, Function>();
+  let command: any;
+  try {
+    mkdirSync(state, { recursive: true });
+    const jobs = Array.from({ length: 6 }, (_, index) => ({
+      id: index === 0 ? "owned-old" : `foreign-${index}`, agentName: "scout", taskPreview: "Done", cwd: root,
+      tmuxSession: `unused-${index}`, status: "stopped", autoStopped: true, idleTimeoutMs: 900_000,
+      createdAt: index + 1, updatedAt: index + 1, resultPath: join(state, `result-${index}.md`),
+    }));
+    writeFileSync(join(state, "jobs.json"), JSON.stringify({ version: 1, jobs }));
+    extension({ registerTool() {}, on(name: string, handler: Function) { handlers.set(name, handler); }, registerCommand(_name: string, def: any) { command = def; } } as any);
+    await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory("owned-old") });
+    await command.handler("", { cwd: root, ui: { custom: async (factory: Function) => {
+      const component = factory({ requestRender() {} }, {}, {}, () => undefined);
+      const output = component.render(100).join("\n");
+      assert.match(output, /This session\n> scout/);
+      assert.doesNotMatch(output, /This session: no jobs/);
+      component.handleInput("\r");
+      return { type: "close" };
+    } } });
+  } finally {
+    await handlersShutdown(handlers);
+    restore();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -687,7 +744,7 @@ test("manager observes completion without stopping the child", async () => {
       notify() {},
     } });
 
-    assert.match(rendered, /Done  1/);
+    assert.match(rendered, /scout-complete\s+Done/);
     assert.match(rendered, /scout-complete/);
     execFileSync("tmux", ["has-session", "-t", tmuxSession], { stdio: "ignore" });
     const saved = JSON.parse(readFileSync(join(state, "jobs.json"), "utf8")).jobs[0];
@@ -788,8 +845,9 @@ test("parent polling observes finite idle lifetimes without closing children", a
     mkdirSync(jobDir, { recursive: true });
     createTmuxSession(tmuxSession);
     extension({ on(name: string, handler: Function) { handlers.set(name, handler); }, registerTool(value: any) { tool = value; } } as any);
-    for (const [policy, heartbeatState, expectedStatus, expectedPolls] of [
+    for (const [policy, heartbeatState, expectedStatus, expectedPolls, savedStatus] of [
       [{ autoStopOnComplete: false, idleTimeoutMs: 900_000 }, "waiting", "waiting", 1],
+      [{ autoStopOnComplete: false, idleTimeoutMs: 900_000 }, "waiting", "waiting", 1, "stopped"],
       [{ autoStopOnComplete: false, idleTimeoutMs: 900_000 }, "shutdown", "waiting", 1],
       [{ autoStopOnComplete: true, idleTimeoutMs: 0 }, "shutdown", "waiting", 1],
       [{ autoStopOnComplete: false, idleTimeoutMs: 0 }, "waiting", "waiting", 0],
@@ -798,10 +856,11 @@ test("parent polling observes finite idle lifetimes without closing children", a
     ] as const) {
       polls = 0;
       const now = Date.now();
-      const job = { id: "idle-child", agentName: "scout", taskPreview: "Done", cwd: root, tmuxSession, status: "waiting", resultPath: join(jobDir, "result.md"), createdAt: now, updatedAt: now, ...policy };
+      const job = { id: "idle-child", agentName: "scout", taskPreview: "Done", cwd: root, tmuxSession, status: savedStatus ?? "waiting", resultPath: join(jobDir, "result.md"), createdAt: now, updatedAt: now, ...policy };
       writeFileSync(join(state, "jobs.json"), JSON.stringify({ version: 1, jobs: [job] }));
       writeFileSync(join(jobDir, "heartbeat.json"), JSON.stringify({ state: heartbeatState, seenRunning: true, updatedAt: now }));
-      await handlers.get("session_start")?.({}, { cwd: root });
+      await handlers.get("session_start")?.({}, { cwd: root, sessionManager: launchHistory(job.id) });
+      assert.equal(polls, expectedPolls, "reload must restore live children despite a saved stopped status");
       const result = await tool.execute("status", { action: "status", childId: job.id });
       assert.equal(result.details.status, expectedStatus);
       assert.equal(polls, expectedPolls);
