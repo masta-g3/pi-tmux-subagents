@@ -25,6 +25,8 @@ flowchart TD
 
 Standalone state is the source of truth under `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-subagents` when unset. `pi-agent-hub` mirroring is optional and adapter-based; normal operation must not require hub state.
 
+Registry mutations use `jobs.lock`. Each acquisition atomically publishes a nonempty directory with a unique PID-based owner filename. Contenders recover dead-process locks and legacy empty lock directories older than five seconds. Live owners and unknown lock contents are never removed. Recovery and release remove only the exact owner file and then the empty directory, so they cannot recursively delete a replacement owner's lock. A live or unrecognized lock still times out after five seconds.
+
 A parent process can supply up to 8,192 characters of opaque child guidance through `PI_TMUX_SUBAGENTS_SYSTEM_PROMPT_APPEND`. The launcher appends a bounded nonblank value after the normal child system instructions and forwards it in the child's explicit environment so nested launches enabled by the package's nesting policy receive the same guidance. This package does not parse the text or depend on Hub; without the variable, prompt generation and launch behavior are unchanged.
 
 Agent frontmatter supports thinking levels `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. `buildPiArgs` emits the resolved value as an explicit `--thinking` argument, including `off`. A recognized `:<thinking>` suffix on the configured model takes precedence over the separate `thinking` field and is stripped from the `--model` value. Unknown suffixes remain part of the model string.

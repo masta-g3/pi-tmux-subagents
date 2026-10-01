@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { jobsPath } from "./paths.js";
 import type { TmuxSubagentJob, TmuxSubagentsRegistry } from "./types.js";
@@ -28,25 +29,83 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function removeEmptyLock(lockDir: string): Promise<boolean> {
+  try {
+    await rmdir(lockDir);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return true;
+    if (code === "ENOTEMPTY" || code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function recoverAbandonedLock(lockDir: string): Promise<boolean> {
+  try {
+    const owners = await readdir(lockDir);
+    if (owners.length === 0) {
+      // Allow time to publish an owner, including for the old ownerless format.
+      if (Date.now() - (await stat(lockDir)).mtimeMs < LOCK_TIMEOUT_MS) return false;
+    } else {
+      const pids = owners.map(owner => /^(\d+)\.[\da-f-]{36}\.owner$/.exec(owner)?.[1]);
+      if (pids.some(pid => !pid || !Number.isSafeInteger(Number(pid)) || Number(pid) <= 0 || processIsAlive(Number(pid)))) return false;
+      // Unique filenames prevent a competing recovery from unlinking a new owner.
+      for (const owner of owners) await rm(join(lockDir, owner), { force: true });
+    }
+    // Never recursively remove a lock: a new owner may have published meanwhile.
+    return await removeEmptyLock(lockDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+}
+
 export async function withStateLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
   await mkdir(root, { recursive: true });
   const lockDir = join(root, "jobs.lock");
-  const started = Date.now();
-  while (true) {
-    try {
-      await mkdir(lockDir);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  const owner = `${process.pid}.${randomUUID()}.owner`;
+  const candidate = join(root, `.jobs-lock-${owner}`);
+  await mkdir(candidate);
+  let acquired = false;
+  try {
+    await writeFile(join(candidate, owner), "", { flag: "wx" });
+    const started = Date.now();
+    while (!acquired) {
+      if (await recoverAbandonedLock(lockDir)) {
+        try {
+          // Publish the directory and its owner together. Rename cannot replace
+          // another contender's nonempty lock directory.
+          await rename(candidate, lockDir);
+          acquired = true;
+          break;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+        }
+      }
       if (Date.now() - started > LOCK_TIMEOUT_MS) throw new Error(`Timed out waiting for state lock: ${lockDir}`);
       await sleep(LOCK_RETRY_MS);
     }
-  }
-
-  try {
     return await fn();
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    if (acquired) {
+      await rm(join(lockDir, owner), { force: true });
+      await removeEmptyLock(lockDir);
+    } else {
+      await rm(candidate, { recursive: true, force: true });
+    }
   }
 }
 
