@@ -40,6 +40,8 @@ export interface WaitOptions {
 
 export interface WaitAnyOptions extends Omit<WaitOptions, "afterTurnIndex" | "executionId"> {
   jobFilter?: (job: TmuxSubagentJob) => boolean;
+  /** Idle children that still owe a turn after a send, keyed by job ID with the last turn index already seen. */
+  pendingTurns?: ReadonlyMap<string, number>;
 }
 
 function childBootstrapPath(): string {
@@ -497,7 +499,10 @@ export async function waitForSubagent(
       }
       if (status.status === "stopped" && !turnComplete) throw new Error(`Subagent stopped before completing the requested turn: ${id}`);
     }
-    if (["stopped", "error"].includes(status.status)) return status;
+    if (["stopped", "error"].includes(status.status)) {
+      if (options.afterTurnIndex !== undefined && !turnComplete) throw new Error(`Subagent stopped before completing the requested turn: ${id}`);
+      return status;
+    }
     if (status.status === "waiting" && turnComplete) return status;
     await sleep(intervalMs);
   }
@@ -510,7 +515,7 @@ export async function waitForAnySubagent(
 ): Promise<SubagentStatusResult> {
   const candidates = (await loadJobs(root)).jobs
     .filter((job) => options.jobFilter?.(job) ?? true)
-    .filter((job) => job.status === "starting" || job.status === "running");
+    .filter((job) => job.status === "starting" || job.status === "running" || options.pendingTurns?.has(job.id));
   if (!candidates.length) throw new Error("No running tmux subagent jobs to wait for.");
 
   const intervalMs = options.intervalMs ?? 1000;
@@ -527,6 +532,11 @@ export async function waitForAnySubagent(
       if (result.status === "rejected") throw result.reason;
       const status = result.value;
       options.onUpdate?.(status);
+      const seen = options.pendingTurns?.get(status.job.id);
+      if (seen !== undefined && (status.latestTurn?.index ?? 0) <= seen) {
+        if (["stopped", "error"].includes(status.status)) throw new Error(`Subagent stopped before completing the requested turn: ${status.job.id}`);
+        if (status.status === "waiting") continue;
+      }
       if (status.status !== "starting" && status.status !== "running") return status;
     }
     await sleep(intervalMs);

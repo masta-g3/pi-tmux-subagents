@@ -61,6 +61,8 @@ const RECENT_STOPPED_STATUS_LIMIT = 5;
 const PACKAGE_NAME = "pi-tmux-subagents";
 const activeJobs = new Map<string, SubagentStatusResult>();
 const sessionJobIds = new Set<string>();
+// A child sent a message without waiting can still look idle; wait-for-any watches it until its next turn arrives.
+const pendingTurns = new Map<string, number>();
 let setStatus: ((text: string | undefined) => void) | undefined;
 let setWidget: ((rows: SubagentViewRow[] | undefined) => void) | undefined;
 let notify: NonNullable<PiContext["ui"]>["notify"];
@@ -404,7 +406,7 @@ async function readGlobalStatuses(root: string, jobs: TmuxSubagentJob[], registr
 const TmuxSubagentParams = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop", "send", "wait", "resume"], description: "Management action. Omit to launch. get reads agent definitions. send continues a live child; resume restarts a stopped child with its saved conversation and a required message. stop is an alias for cancel." },
+    action: { type: "string", enum: ["list", "get", "status", "cancel", "stop", "send", "wait", "resume"], description: "Management action. Omit to launch. get reads agent definitions. send and resume both continue a child: a live child receives the message, and a stopped child with saved session metadata resumes its conversation. wait, and send or resume with wait: true, return the child's reply inline. stop is an alias for cancel." },
     agent: { type: "string", description: "Agent definition name for launch/get, e.g. scout or code-critic. Not a launched child job id." },
     task: { type: "string", description: "Task for launch." },
     label: { type: "string", description: "Optional short dashboard label for launch; prefix with agent type, e.g. worker-auth or scout-api." },
@@ -448,6 +450,25 @@ function formatChildGetHint(status: SubagentStatusResult): string {
     `For this child, use: tmux_subagent({ action: "status", childId: "${status.job.id}" })`,
     statusReadCall(status),
   ].filter(Boolean).join("\n");
+}
+
+const INLINE_RESULT_MAX_CHARS = 4000;
+
+// Turn-completing actions return the child's reply so the parent needs no extra read call.
+async function formatTurnResult(root: string, status: SubagentStatusResult): Promise<string> {
+  const card = formatAgentStatus(status);
+  if (!["waiting", "stopped", "error"].includes(status.status) || !statusResultPath(status)) return card;
+  const text = (await readSubagentResult(root, status.job.id, status))?.trim();
+  if (!text) return card;
+  const seen = pendingTurns.get(status.job.id);
+  if (seen !== undefined && (status.latestTurn?.index ?? 0) > seen) pendingTurns.delete(status.job.id);
+  if (text.length > INLINE_RESULT_MAX_CHARS) return `${card}\n\n${text.slice(0, INLINE_RESULT_MAX_CHARS)}\n[truncated; read the full result at the path above]`;
+  const lines = card.split("\n").filter((line) => !/^   (read|next): /.test(line));
+  return `${lines.join("\n")}\n\n${text}`;
+}
+
+function hasSavedSession(job: TmuxSubagentJob): boolean {
+  return Boolean(job.sessionFile && job.sessionId && job.resolvedModel && job.resolvedThinking);
 }
 
 function formatStoppedSendHint(status: SubagentStatusResult): string {
@@ -747,19 +768,24 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     lastStatusText = "";
     lastWidgetText = "";
     sessionJobIds.clear();
-    const launchCalls = new Set<string>();
+    pendingTurns.clear();
+    const calls = new Map<string, Record<string, unknown>>();
     for (const entry of ctx.sessionManager?.getEntries() ?? []) {
       if (entry.type !== "message") continue;
       const message = entry.message;
       if (message.role === "assistant") {
         for (const part of message.content) {
-          if (part.type === "toolCall" && part.name === "tmux_subagent"
-            && ((!part.arguments.action && part.arguments.agent && part.arguments.task) || part.arguments.action === "resume")) launchCalls.add(part.id);
+          if (part.type === "toolCall" && part.name === "tmux_subagent") calls.set(part.id, part.arguments);
         }
-      } else if (message.role === "toolResult" && message.toolName === "tmux_subagent" && launchCalls.has(message.toolCallId)) {
-        const details = message.details as TmuxSubagentJob | SubagentStatusResult | undefined;
+      } else if (message.role === "toolResult" && message.toolName === "tmux_subagent") {
+        const call = calls.get(message.toolCallId);
+        if (!call) continue;
+        const details = message.details as ((TmuxSubagentJob | SubagentStatusResult) & { pendingTurn?: number }) | undefined;
         const job = details && ("job" in details ? details.job : details);
-        if (job?.id) sessionJobIds.add(job.id);
+        if (!job?.id || (message.isError && details?.pendingTurn === undefined)) continue;
+        if ((!call.action && call.agent && call.task) || call.action === "resume" || call.action === "send") sessionJobIds.add(job.id);
+        if (details?.pendingTurn !== undefined) pendingTurns.set(job.id, details.pendingTurn);
+        else if (call.action === "stop" || call.action === "cancel" || call.action === "wait" || call.wait || (!call.action && !call.background)) pendingTurns.delete(job.id);
       }
     }
     if (sessionJobIds.size) {
@@ -794,6 +820,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
     stopStatusPolling();
     activeJobs.clear();
     sessionJobIds.clear();
+    pendingTurns.clear();
   });
 
   pi.registerCommand?.("subagents", {
@@ -885,6 +912,48 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         return reply(formatAgentStatus(status), status);
       }
 
+      const failedWaitReply = (error: unknown, id: string | undefined) => {
+        const ids = [...pendingTurns.keys()].filter(key => key === id || (id && key.startsWith(id)));
+        const job = ids.length === 1 ? activeJobs.get(ids[0]!)?.job : undefined;
+        const details = job ? { job, pendingTurn: pendingTurns.get(job.id) } : undefined;
+        return reply(formatTimeoutHint(error, id), details, true);
+      };
+
+      const resumeDenied = (job: TmuxSubagentJob) => inNestedSession && (!nestedCanAccessJob(job, nestedPolicy.childId) || !nestedPolicy.allowlist.includes(job.agentName) || nestedPolicy.depth + 1 > maxNestedDepth());
+      const resumeDeniedReply = () => reply("Nested children may resume only their own allowed jobs within the depth limit.", undefined, true);
+
+      const resumeChild = async (saved: TmuxSubagentJob, message: string) => {
+        const before = await getSubagentStatus(root, saved.id);
+        const job = await resumeSubagent(root, before.job.id, message);
+        sessionJobIds.add(job.id);
+        trackJob(job);
+        pendingTurns.set(job.id, before.latestTurn?.index ?? 0);
+        if (!params.wait) return reply(`Resumed ${jobDisplayName(job)} as ${job.id}\nstate: starting`, { ...job, pendingTurn: before.latestTurn?.index ?? 0 });
+        const status = await waitForSubagent(root,job.id,undefined,{signal,timeoutMs:params.timeoutMs,afterTurnIndex:before.latestTurn?.index ?? 0,executionId:job.executionId,cancelOnAbort:false});
+        trackStatus(status);
+        return reply(await formatTurnResult(root, status),status,status.status === "error");
+      };
+
+      // send and resume each accept a child in either state: a stopped child with a saved session resumes, a live one receives the message.
+      const sendChild = async (before: SubagentStatusResult, message: string) => {
+        if (inNestedSession && !nestedCanAccessJob(before.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
+        if (before.status === "stopped") {
+          if (!hasSavedSession(before.job)) return reply(formatStoppedSendHint(before), before, true);
+          return resumeDenied(before.job) ? resumeDeniedReply() : resumeChild(before.job, message);
+        }
+        if ((before.status === "starting" || before.status === "running") && !before.heartbeat?.attention) return reply(formatBusySendHint(before), before, true);
+        let status = before.heartbeat?.attention ? await sendSubagentAttentionReply(root, before.job.id, message) : await sendSubagentMessage(root, before.job.id, message);
+        sessionJobIds.add(before.job.id);
+        pendingTurns.set(before.job.id, before.latestTurn?.index ?? 0);
+        trackStatus(status);
+        if (params.wait) {
+          status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
+        }
+        trackStatus(status);
+        // Without wait the latest result is the previous turn; do not point the parent at it.
+        return reply(params.wait ? await formatTurnResult(root, status) : `Sent to ${jobDisplayName(before.job)}. Use wait for its next turn.`, params.wait ? status : { ...status, pendingTurn: before.latestTurn?.index ?? 0 }, status.status === "error");
+      };
+
       if (params.action === "resume") {
         const id = params.childId ?? params.id;
         if (!id) return reply("Missing childId for resume.", undefined, true);
@@ -893,18 +962,10 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         if (launchOnly.some(key => params[key] !== undefined)) return reply("Resume does not accept launch-only overrides; it uses the saved child configuration.", undefined, true);
         try {
           const saved = await resolveJob(root, id);
-          if (inNestedSession && (!nestedCanAccessJob(saved, nestedPolicy.childId) || !nestedPolicy.allowlist.includes(saved.agentName) || nestedPolicy.depth + 1 > maxNestedDepth())) {
-            return reply("Nested children may resume only their own allowed jobs within the depth limit.", undefined, true);
-          }
+          if (resumeDenied(saved)) return resumeDeniedReply();
           const before = await getSubagentStatus(root, saved.id);
-          const job = await resumeSubagent(root, before.job.id, params.message);
-          sessionJobIds.add(job.id);
-          trackJob(job);
-          if (!params.wait) return reply(`Resumed ${jobDisplayName(job)} as ${job.id}\nstate: starting`, job);
-          const status = await waitForSubagent(root,job.id,undefined,{signal,timeoutMs:params.timeoutMs,afterTurnIndex:before.latestTurn?.index ?? 0,executionId:job.executionId,cancelOnAbort:false});
-          trackStatus(status);
-          return reply(formatAgentStatus(status),status,status.status === "error");
-        } catch (error) { return reply(formatTimeoutHint(error,id),undefined,true); }
+          return before.status === "stopped" ? await resumeChild(saved, params.message) : await sendChild(before, params.message);
+        } catch (error) { return failedWaitReply(error, id); }
       }
 
       if (params.action === "send") {
@@ -912,18 +973,9 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         if (!id) return reply("Missing childId for send action.", undefined, true);
         if (!params.message) return reply("Missing message for send action.", undefined, true);
         try {
-          const before = await getSubagentStatus(root, id);
-          if (inNestedSession && !nestedCanAccessJob(before.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
-          if (before.status === "stopped") return reply(formatStoppedSendHint(before), before, true);
-          if ((before.status === "starting" || before.status === "running") && !before.heartbeat?.attention) return reply(formatBusySendHint(before), before, true);
-          let status = before.heartbeat?.attention ? await sendSubagentAttentionReply(root, before.job.id, params.message) : await sendSubagentMessage(root, before.job.id, params.message);
-          if (params.wait) {
-            status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: before.latestTurn?.index ?? 0, cancelOnAbort: false });
-          }
-          trackStatus(status);
-          return reply(formatAgentStatus(status), status, status.status === "error");
+          return await sendChild(await getSubagentStatus(root, id), params.message);
         } catch (error) {
-          return reply(formatTimeoutHint(error, id), undefined, true);
+          return failedWaitReply(error, id);
         }
       }
 
@@ -934,19 +986,21 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           if (id) {
             const before = await getSubagentStatus(root, id);
             if (inNestedSession && !nestedCanAccessJob(before.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
-            status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, cancelOnAbort: false });
+            status = await waitForSubagent(root, before.job.id, undefined, { signal, timeoutMs: params.timeoutMs, afterTurnIndex: pendingTurns.get(before.job.id), cancelOnAbort: false });
           } else {
             status = await waitForAnySubagent(root, undefined, {
               signal,
               timeoutMs: params.timeoutMs,
               cancelOnAbort: false,
-              jobFilter: inNestedSession ? (job) => nestedCanAccessJob(job, nestedPolicy.childId) : undefined,
+              // Only this session's children; the shared registry also holds other sessions' and stale jobs.
+              jobFilter: inNestedSession ? (job) => nestedCanAccessJob(job, nestedPolicy.childId) : (job) => sessionJobIds.has(job.id),
+              pendingTurns,
             });
           }
           trackStatus(status);
-          return reply(formatAgentStatus(status), status, status.status === "error");
+          return reply(await formatTurnResult(root, status), status, status.status === "error");
         } catch (error) {
-          return reply(formatTimeoutHint(error, id), undefined, true);
+          return failedWaitReply(error, id);
         }
       }
 
@@ -958,6 +1012,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
           if (!nestedCanAccessJob(before.job, nestedPolicy.childId)) return reply(`Nested child sessions can only manage jobs they launched.`, undefined, true);
         }
         const job = await cancelSubagent(root, id);
+        pendingTurns.delete(job.id);
         trackJob(job);
         return reply(`Stopped ${job.id} (${job.tmuxSession}).`, job);
       }
@@ -992,12 +1047,13 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         displayName: normalizeDisplayName(params.label),
       });
       sessionJobIds.add(job.id);
+      pendingTurns.set(job.id, 0);
       trackJob(job);
       if (params.background) {
         return reply([
           `Launched ${jobDisplayName(job)}${job.displayName ? ` (${job.agentName})` : ""} as ${job.id}`,
           `state: ${job.status}`,
-        ].join("\n"), job);
+        ].join("\n"), { ...job, pendingTurn: 0 });
       }
 
       const final = await waitForSubagent(root, job.id, undefined, {
@@ -1008,7 +1064,7 @@ export default function tmuxSubagentsExtension(pi: ExtensionAPI) {
         } : undefined,
       });
       trackStatus(final);
-      return reply(formatAgentStatus(final), final, final.status === "error");
+      return reply(await formatTurnResult(root, final), final, final.status === "error");
     },
   });
 }

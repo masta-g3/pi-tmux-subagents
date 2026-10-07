@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Fast read-only codebase evidence gathering; not for analysis or decisions
-model: openai-codex/gpt-5.6-luna
+model: openai-codex/gpt-6-luna
 thinking: medium
 tools: read, bash
 systemPromptMode: replace

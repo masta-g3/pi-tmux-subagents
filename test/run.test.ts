@@ -528,6 +528,39 @@ test("waitForSubagent returns already waiting sessions without requiring a futur
   assert.equal(status.result, undefined, "waiting must not read result bodies");
 }));
 
+test("waitForAnySubagent includes an idle child that owes a turn after send", async () => withNoAgentHub(async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-wait-any-pending-test-"));
+  let updates = 0;
+  const tmux: TmuxExecutor = async () => ({ stdout: "", stderr: "" });
+  const busy = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Busy", background: true, tmux });
+  const sent = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Sent", background: true, tmux });
+  const heartbeat = (job: typeof busy, state: string) => JSON.stringify({ jobId: job.id, executionId: job.executionId, cwd: root, state, stateSince: 2, updatedAt: 3, seenRunning: true });
+  const turns = (job: typeof busy, count: number) => {
+    const dir = join(root, "jobs", job.id, "turns");
+    const list = Array.from({ length: count }, (_, i) => ({ index: i + 1, executionId: job.executionId, status: "waiting", startedAt: 2, completedAt: 3, resultPath: join(dir, `00${i + 1}-result.md`) }));
+    for (const turn of list) writeFileSync(turn.resultPath, "done", "utf8");
+    writeFileSync(join(dir, "turns.json"), JSON.stringify({ version: 1, turns: list }), "utf8");
+  };
+  for (const job of [busy, sent]) await mkdir(join(root, "jobs", job.id, "turns"), { recursive: true });
+  await writeFile(join(root, "jobs", busy.id, "heartbeat.json"), heartbeat(busy, "running"), "utf8");
+  await writeFile(join(root, "jobs", sent.id, "heartbeat.json"), heartbeat(sent, "waiting"), "utf8");
+  turns(sent, 1);
+  assert.equal((await getSubagentStatus(root, sent.id, tmux)).status, "waiting");
+
+  const status = await waitForAnySubagent(root, tmux, {
+    intervalMs: 1,
+    timeoutMs: 1000,
+    pendingTurns: new Map([[sent.id, 1]]),
+    onUpdate() {
+      updates += 1;
+      if (updates === 2) turns(sent, 2);
+    },
+  });
+
+  assert.equal(status.job.id, sent.id);
+  assert.equal(status.latestTurn?.index, 2);
+}));
+
 test("waitForAnySubagent returns the first active child that completes", async () => withNoAgentHub(async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-wait-any-test-"));
   let updates = 0;
@@ -577,8 +610,8 @@ test("waitForSubagent returns stopped sessions without waiting for a new turn", 
   };
   const job = await launchSubagent({ stateRoot: root, cwd: root, agent, task: "Inspect auth", background: true, tmux });
 
-  const status = await waitForSubagent(root, job.id, tmux, { afterTurnIndex: 1, intervalMs: 1, timeoutMs: 100 });
-
+  await assert.rejects(() => waitForSubagent(root, job.id, tmux, { afterTurnIndex: 1, intervalMs: 1, timeoutMs: 100 }), /stopped before completing the requested turn/);
+  const status = await waitForSubagent(root, job.id, tmux, { intervalMs: 1, timeoutMs: 100 });
   assert.equal(status.status, "stopped");
 }));
 

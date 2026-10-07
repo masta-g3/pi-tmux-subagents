@@ -1,7 +1,7 @@
 ---
 name: supervisor
 description: Run, monitor, and report on long-running jobs
-model: openai-codex/gpt-5.6-luna
+model: openai-codex/gpt-6-luna
 thinking: high
 tools: read, bash
 systemPromptMode: replace

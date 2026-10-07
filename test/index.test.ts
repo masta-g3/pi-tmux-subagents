@@ -1033,6 +1033,101 @@ test("tmux_subagent get with childId explains child result lookup", async () => 
   }
 });
 
+for (const failedWait of [false, true]) test(`reload restores pending send results, including failed waits: ${failedWait}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-pending-reload-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "pending-child";
+  const dir = join(state, "jobs", id);
+  const turnPath = join(dir, "turns", "002-result.md");
+  mkdirSync(join(dir, "turns"), { recursive: true });
+  const job = { id, agentName: "worker", cwd: root, tmuxSession: "missing-session", status: "stopped", resultPath: join(dir, "result.md"), createdAt: 1, updatedAt: 2 };
+  writeFileSync(join(state, "jobs.json"), JSON.stringify({ version: 1, jobs: [job] }));
+  writeFileSync(turnPath, "Fresh reply\nREADY FOR REVIEW\n");
+  writeFileSync(join(dir, "turns", "turns.json"), JSON.stringify({ version: 1, turns: [{ index: 2, status: "waiting", startedAt: 1, completedAt: 2, resultPath: turnPath }] }));
+  const restore = isolatePiStateEnv(agentDir);
+  const handlers = new Map<string, Function>();
+  let tool: any;
+  try {
+    extension({ on(name: string, handler: Function) { handlers.set(name, handler); }, registerTool(value: any) { tool = value; } } as any);
+    await handlers.get("session_start")?.({}, { cwd: root, sessionManager: { getEntries: () => [
+      { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "send-call", name: "tmux_subagent", arguments: { action: "send", childId: id, message: "Execute", wait: failedWait } }] } },
+      { type: "message", message: { role: "toolResult", toolName: "tmux_subagent", toolCallId: "send-call", isError: failedWait, details: { job, pendingTurn: 1 } } },
+    ] } });
+    writeFileSync(join(dir, "turns", "turns.json"), JSON.stringify({ version: 1, turns: [{ index: 1, status: "waiting", startedAt: 1, completedAt: 2, resultPath: turnPath }] }));
+    const stale = await tool.execute("stale", { action: "wait", childId: id, timeoutMs: 1000 }, undefined, undefined, { cwd: root });
+    assert.equal(stale.isError, true);
+    assert.match(stale.content[0].text, /stopped before completing the requested turn/);
+    writeFileSync(join(dir, "turns", "turns.json"), JSON.stringify({ version: 1, turns: [{ index: 2, status: "waiting", startedAt: 1, completedAt: 2, resultPath: turnPath }] }));
+    await tool.execute("status", { action: "status", childId: id }, undefined, undefined, { cwd: root });
+    const result = await tool.execute("wait", { action: "wait", timeoutMs: 1000 }, undefined, undefined, { cwd: root });
+    assert.equal(result.isError, false);
+    assert.match(result.content[0].text, /Fresh reply/);
+    const next = await tool.execute("wait2", { action: "wait", timeoutMs: 1000 }, undefined, undefined, { cwd: root });
+    assert.equal(next.isError, true);
+    assert.match(next.content[0].text, /No running tmux subagent jobs/);
+  } finally {
+    await handlersShutdown(handlers);
+    restore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tmux_subagent wait returns the child result inline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-wait-inline-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "child-wait-inline";
+  const turnPath = join(state, "jobs", id, "turns", "001-result.md");
+  mkdirSync(join(state, "jobs", id, "turns"), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "code-critic", taskPreview: "Review", cwd: root, tmuxSession: "missing-session", status: "stopped", resultPath: join(state, "jobs", id, "result.md"), createdAt: 1, updatedAt: 2 }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "result.md"), "Findings: none.\nREADY FOR REFLECT\n");
+  writeFileSync(turnPath, "Findings: none.\nREADY FOR REFLECT\n");
+  writeFileSync(join(state, "jobs", id, "turns", "turns.json"), `${JSON.stringify({ version: 1, turns: [{ index: 1, status: "waiting", startedAt: 1, completedAt: 2, resultPath: turnPath }] }, null, 2)}\n`);
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { action: "wait", childId: id, timeoutMs: 1000 }, undefined, undefined, { cwd: root });
+
+    assert.match(result.content[0].text, /READY FOR REFLECT/);
+    assert.doesNotMatch(result.content[0].text, /next: read\(/);
+  } finally {
+    restorePiEnv();
+  }
+});
+
+test("tmux_subagent wait for any ignores children of other sessions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-wait-any-scope-test-"));
+  const agentDir = join(root, "agent");
+  const state = join(agentDir, "pi-tmux-subagents");
+  const id = "foreign-running-child";
+  mkdirSync(join(state, "jobs", id), { recursive: true });
+  writeFileSync(join(state, "jobs.json"), `${JSON.stringify({
+    version: 1,
+    jobs: [{ id, agentName: "worker", taskPreview: "Other session", cwd: root, tmuxSession: "missing-session", status: "running", resultPath: join(state, "jobs", id, "result.md"), createdAt: 1, updatedAt: 2 }],
+  }, null, 2)}\n`);
+  writeFileSync(join(state, "jobs", id, "heartbeat.json"), "");
+
+  const restorePiEnv = isolatePiStateEnv(agentDir);
+  try {
+    let tool: any;
+    extension({ registerTool(def: any) { tool = def; }, on() {} } as any);
+
+    const result = await tool.execute("call", { action: "wait", timeoutMs: 1000 }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /No running tmux subagent jobs/);
+  } finally {
+    restorePiEnv();
+  }
+});
+
 test("tmux_subagent send to stopped child points at the result", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-index-send-stopped-test-"));
   const agentDir = join(root, "agent");
