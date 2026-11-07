@@ -184,6 +184,8 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
   let idleSince: number | undefined;
   let lifetimeJob: TmuxSubagentJob | undefined;
   let closing = false;
+  // An Esc interrupt stays an error for the parent's wait, but Hub shows it like an interrupted parent session.
+  let interrupted = false;
 
   async function withCurrentExecution<T>(fn: (job: TmuxSubagentJob) => Promise<T>): Promise<T> {
     return withStateLock(stateRoot, async () => {
@@ -246,11 +248,12 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
       attention,
       idleSince,
     };
+    const hubData = interrupted && state === "error" ? { ...data, state: "waiting" as const, message: undefined } : data;
     const publish = () => withCurrentExecution(async () => {
       await writeJson(heartbeatPath(stateRoot, jobId), data);
       if (process.env.PI_AGENT_HUB_DIR && process.env.PI_AGENT_HUB_SESSION_ID) {
         await writeJson(join(process.env.PI_AGENT_HUB_DIR, "heartbeats", `${process.env.PI_AGENT_HUB_SESSION_ID}.json`), {
-          ...data,
+          ...hubData,
           managedSessionId: process.env.PI_AGENT_HUB_SESSION_ID,
           kind: process.env.PI_AGENT_HUB_KIND,
           parentId: process.env.PI_AGENT_HUB_PARENT_ID,
@@ -308,18 +311,28 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     }
     if (lifetimeJob.accountingVersion === 1) settlePersistedUsage(ctx as PiContext);
     await heartbeat("waiting", ctx as PiContext);
+    // Ticks are single-flight so retries under lock contention never pile up behind each other.
+    let tickInFlight = false;
+    let heartbeatFailing = false;
     timer = setInterval(async () => {
+      if (tickInFlight) return;
+      tickInFlight = true;
       try {
-        await heartbeat(currentState, ctx);
-      } catch (error) {
-        if (timer) clearInterval(timer);
-        ctx.ui.notify(`Subagent heartbeat stopped: ${error instanceof Error ? error.message : String(error)}`, "error");
-        return;
-      }
-      try {
-        await maybeClose(ctx);
-      } catch (error) {
-        ctx.ui.notify(`Could not shut down idle subagent: ${error instanceof Error ? error.message : String(error)}`, "error");
+        try {
+          await heartbeat(currentState, ctx);
+          heartbeatFailing = false;
+        } catch (error) {
+          if (!heartbeatFailing) ctx.ui.notify(`Subagent heartbeat failed; retrying: ${error instanceof Error ? error.message : String(error)}`, "error");
+          heartbeatFailing = true;
+          return;
+        }
+        try {
+          await maybeClose(ctx);
+        } catch (error) {
+          ctx.ui.notify(`Could not shut down idle subagent: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+      } finally {
+        tickInFlight = false;
       }
     }, HEARTBEAT_INTERVAL_MS);
     await maybeClose(ctx as PiContext);
@@ -328,6 +341,7 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     pendingMessages = undefined;
     attention = undefined;
     idleSince = undefined;
+    interrupted = false;
     if (!runActive) {
       if (lifetimeJob?.accountingVersion === 1) {
         settlePersistedUsage(ctx as PiContext);
@@ -389,6 +403,7 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     if (last?.stopReason === "error" || last?.stopReason === "aborted") {
       runActive = false;
       idleSince = undefined;
+      interrupted = last.stopReason === "aborted";
       await heartbeat("error", ctx, last.errorMessage || `Child run ${last.stopReason}`);
       return;
     }

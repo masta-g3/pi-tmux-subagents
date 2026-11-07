@@ -43,6 +43,46 @@ test("child completion waits for settled and preserves errors and aborts", async
   }
 });
 
+test("interrupted runs mirror waiting to Hub while the producer keeps the error", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-interrupt-mirror-test-"));
+  const resultPath = join(root, "jobs", "child-1", "result.md");
+  let tick: (() => Promise<void>) | undefined;
+  t.mock.method(globalThis, "setInterval", (callback: () => Promise<void>) => { tick = callback; return undefined; });
+  try {
+    await withChildEnv(root, resultPath, async () => {
+      const hubDir = join(root, "hub");
+      process.env.PI_AGENT_HUB_DIR = hubDir;
+      process.env.PI_AGENT_HUB_SESSION_ID = "child-1";
+      const handlers = loadBootstrapHandlers();
+      const ctx = { cwd: root, isIdle: () => true, shutdown() {}, ui: { notify() {} } };
+      const producer = () => readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8").then(JSON.parse);
+      const mirror = () => readFile(join(hubDir, "heartbeats", "child-1.json"), "utf8").then(JSON.parse);
+      const end = async (stopReason: string) => {
+        await handlers.agent_start?.({}, ctx);
+        await handlers.agent_end?.({ messages: [{ role: "assistant", stopReason, errorMessage: `Run ${stopReason}`, content: [] }] }, ctx);
+        await handlers.agent_settled?.({}, ctx);
+      };
+      try {
+        await handlers.session_start?.({}, ctx);
+        await end("aborted");
+        assert.equal((await producer()).state, "error", "a parent wait still sees the interrupt");
+        assert.deepEqual([(await mirror()).state, (await mirror()).message], ["waiting", undefined]);
+        await tick!();
+        assert.equal((await mirror()).state, "waiting", "periodic ticks keep the interrupt mirrored as waiting");
+        await handlers.agent_start?.({}, ctx);
+        assert.equal((await mirror()).state, "running");
+        await end("error");
+        assert.equal((await producer()).state, "error");
+        assert.deepEqual([(await mirror()).state, (await mirror()).message], ["error", "Run error"]);
+      } finally {
+        await handlers.session_shutdown?.({}, ctx);
+      }
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("new one-shot children close after successful publication and finalize on shutdown", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-one-shot-test-"));
   const resultPath = join(root, "jobs", "child-1", "result.md");
@@ -401,11 +441,11 @@ test("legacy policy-less children and failed runs never close automatically", as
   }
 });
 
-test("periodic heartbeat write failures are reported without an unhandled rejection", async (t) => {
+test("periodic heartbeat write failures are reported once and retried", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-heartbeat-error-test-"));
   const resultPath = join(root, "jobs", "child-1", "result.md");
-  let tick: (() => void) | undefined;
-  t.mock.method(globalThis, "setInterval", (callback: () => void) => { tick = callback; return undefined; });
+  let tick: (() => Promise<void>) | undefined;
+  t.mock.method(globalThis, "setInterval", (callback: () => Promise<void>) => { tick = callback; return undefined; });
   const notices: string[] = [];
   try {
     await withChildEnv(root, resultPath, async () => {
@@ -416,9 +456,18 @@ test("periodic heartbeat write failures are reported without an unhandled reject
         await handlers.session_start?.({}, ctx);
         await rm(path);
         await mkdir(path);
-        tick!();
-        for (let attempt = 0; attempt < 100 && !notices.length; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
-        assert.match(notices.join("\n"), /Subagent heartbeat stopped:/);
+        await tick!();
+        await tick!();
+        assert.equal(notices.length, 1, "one notice per failure streak");
+        assert.match(notices[0]!, /Subagent heartbeat failed; retrying:/);
+        await rm(path, { recursive: true });
+        await tick!();
+        assert.equal(JSON.parse(await readFile(path, "utf8")).state, "waiting", "a later tick writes again");
+        let firstSettled = false;
+        const first = Promise.resolve(tick!()).then(() => { firstSettled = true; });
+        await tick!();
+        assert.equal(firstSettled, false, "a tick never queues behind one in flight");
+        await first;
       } finally {
         await rm(path, { recursive: true, force: true });
         await handlers.session_shutdown?.({}, ctx);
