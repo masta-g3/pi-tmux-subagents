@@ -5,7 +5,8 @@ import { jobsPath } from "./paths.js";
 import type { TmuxSubagentJob, TmuxSubagentsRegistry } from "./types.js";
 
 const LOCK_RETRY_MS = 25;
-const LOCK_TIMEOUT_MS = 5000;
+const LOCK_TIMEOUT_MS = 30_000;
+const ABANDONED_EMPTY_LOCK_MS = 5_000;
 
 export const emptyJobs = (): TmuxSubagentsRegistry => ({ version: 1, jobs: [] });
 
@@ -57,7 +58,7 @@ async function recoverAbandonedLock(lockDir: string): Promise<boolean> {
     const owners = await readdir(lockDir);
     if (owners.length === 0) {
       // Allow time to publish an owner, including for the old ownerless format.
-      if (Date.now() - (await stat(lockDir)).mtimeMs < LOCK_TIMEOUT_MS) return false;
+      if (Date.now() - (await stat(lockDir)).mtimeMs < ABANDONED_EMPTY_LOCK_MS) return false;
     } else {
       const pids = owners.map(owner => /^(\d+)\.[\da-f-]{36}\.owner$/.exec(owner)?.[1]);
       if (pids.some(pid => !pid || !Number.isSafeInteger(Number(pid)) || Number(pid) <= 0 || processIsAlive(Number(pid)))) return false;

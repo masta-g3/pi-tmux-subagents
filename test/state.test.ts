@@ -125,6 +125,30 @@ test("state lock serializes writers in separate processes", async (t) => {
   assert.deepEqual(await readdir(root), ["jobs.json"]);
 });
 
+test("state lock waits through a busy owner before timing out", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-state-lock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let release!: () => void;
+  let entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const holding = withStateLock(root, async () => {
+    entered();
+    await new Promise<void>(resolve => { release = resolve; });
+  });
+  await ready;
+  let secondEntered = false;
+  const waiting = withStateLock(root, async () => { secondEntered = true; }).then(() => null, error => error);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 5_500));
+    assert.equal(secondEntered, false);
+  } finally {
+    release();
+    await holding;
+  }
+  assert.equal(await waiting, null);
+  assert.equal(secondEntered, true);
+});
+
 test("state lock refuses unknown lock contents and cleans up its candidate", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pi-tmux-state-lock-"));
   t.after(() => rm(root, { recursive: true, force: true }));
