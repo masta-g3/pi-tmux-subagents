@@ -892,6 +892,128 @@ test("child bootstrap mirrors heartbeats to pi-agent-hub when configured", async
   });
 });
 
+const WORKFLOW_STEPS = [
+  { id: "plan-md", short: "PL", label: "Plan" },
+  { id: "execute", short: "EX", label: "Execute" },
+  { id: "review", short: "RV", label: "Review" },
+];
+
+function workflowEntry(data: Record<string, unknown>) {
+  return { type: "custom", customType: "workflow-runtime", data };
+}
+
+async function hubHeartbeatFor(root: string, branch: unknown[], drive?: (handlers: Record<string, Function>, ctx: Record<string, unknown>) => Promise<void>) {
+  const hubDir = join(root, "hub");
+  let heartbeat: Record<string, unknown> = {};
+  let internal: Record<string, unknown> = {};
+  await withChildEnv(root, join(root, "jobs", "child-1", "result.md"), async () => {
+    process.env.PI_AGENT_HUB_DIR = hubDir;
+    process.env.PI_AGENT_HUB_SESSION_ID = "child-1";
+    process.env.PI_AGENT_HUB_PARENT_ID = "parent-1";
+    process.env.PI_AGENT_HUB_KIND = "subagent";
+    const handlers = loadBootstrapHandlers();
+    const ctx = { cwd: root, isIdle: () => true, sessionManager: { getBranch: () => branch } };
+    await handlers.session_start?.({ type: "session_start" } as any, ctx);
+    if (drive) await drive(handlers, ctx);
+    heartbeat = JSON.parse(await readFile(join(hubDir, "heartbeats", "child-1.json"), "utf8"));
+    internal = JSON.parse(await readFile(join(root, "jobs", "child-1", "heartbeat.json"), "utf8"));
+    await handlers.session_shutdown?.({ type: "session_shutdown" } as any, ctx);
+  });
+  return { heartbeat, internal };
+}
+
+test("the Hub heartbeat carries the child's latest workflow as Hub fields, without producer-private state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-hub-workflow-"));
+  const lens = { doing: "Add at to items", stages: [{ label: "1", state: "active" }], progress: { completed: 5, total: 12, unit: "tasks" }, list: { label: "PLAN", head: "Transport", items: [{ state: "active", text: "Add at" }], before: 0, after: 3 } };
+  const branch = [
+    workflowEntry({ activeStep: "plan-md", steps: WORKFLOW_STEPS, updatedAt: 1 }),
+    { type: "message" },
+    workflowEntry({
+      activeStep: "execute", ticketId: "card-001", steps: WORKFLOW_STEPS, updatedAt: 2, currentStepComplete: false,
+      activity: { id: "x", label: "Doing" }, lens,
+      activityPasses: { a: 1 }, stepFacts: { pushed: true }, stepItems: [], orchestration: { tickets: [] },
+      worktreeRecord: "/r.json", source: "tool", execution: { mode: "focus" }, plan: { tasks: { completed: 5, total: 12 } }, activeMode: { id: "focus", short: "FOC" },
+    }),
+  ];
+  const { heartbeat, internal } = await hubHeartbeatFor(root, branch);
+  assert.deepEqual(heartbeat.workflow, {
+    steps: WORKFLOW_STEPS, activeIndex: 1, updatedAt: 2, ticketId: "card-001", currentStepComplete: false,
+    activity: { id: "x", label: "Doing" }, lens, activeMode: { id: "focus", short: "FOC" },
+  });
+  assert.equal(heartbeat.lens, undefined);
+  assert.equal(internal.workflow, undefined);
+  assert.equal(internal.lens, undefined);
+});
+
+test("a lens-only child entry becomes a top-level lens, and unusable entries add nothing", async () => {
+  const lens = { doing: "Running 2 tickets", progress: { completed: 1, total: 4, unit: "committed" } };
+  const lensOnly = await hubHeartbeatFor(mkdtempSync(join(tmpdir(), "pi-tmux-child-hub-lens-")), [workflowEntry({ heldStep: "plan-md", steps: WORKFLOW_STEPS, updatedAt: 3, lens })]);
+  assert.deepEqual(lensOnly.heartbeat.lens, lens);
+  assert.equal(lensOnly.heartbeat.workflow, undefined);
+
+  for (const branch of [
+    [],
+    [workflowEntry({ activeStep: "commit", steps: WORKFLOW_STEPS, updatedAt: 1 })],
+    [workflowEntry({ activeStep: "execute", steps: "bad", updatedAt: 1 })],
+    [workflowEntry({ steps: WORKFLOW_STEPS, updatedAt: 1 })],
+  ]) {
+    const { heartbeat } = await hubHeartbeatFor(mkdtempSync(join(tmpdir(), "pi-tmux-child-hub-none-")), branch);
+    assert.equal(heartbeat.workflow, undefined, JSON.stringify(branch));
+    assert.equal(heartbeat.lens, undefined, JSON.stringify(branch));
+  }
+});
+
+test("the Hub heartbeat logs the child's tool calls like a Hub-managed session, on the periodic tick", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-hub-activity-"));
+  let tick: (() => Promise<void>) | undefined;
+  t.mock.method(globalThis, "setInterval", (callback: () => Promise<void>) => { tick = callback; return undefined; });
+  const snapshots: Array<Record<string, any>> = [];
+  const hubFile = join(root, "hub", "heartbeats", "child-1.json");
+  // Tool events only update memory; the next tick publishes them.
+  const read = async () => { await tick!(); snapshots.push(JSON.parse(await readFile(hubFile, "utf8"))); };
+  await hubHeartbeatFor(root, [], async (handlers, ctx) => {
+    const before = await readFile(hubFile, "utf8");
+    await handlers.tool_execution_start?.({ toolCallId: "z", toolName: "bash", args: { command: "true" } }, ctx);
+    assert.equal(await readFile(hubFile, "utf8"), before, "a tool start writes nothing by itself");
+    await handlers.tool_execution_end?.({ toolCallId: "z", toolName: "bash", isError: false }, ctx);
+    const start = (id: string, toolName: string, args: unknown, extra: Record<string, unknown> = {}) => handlers.tool_execution_start?.({ toolCallId: id, toolName, args, ...extra }, ctx);
+    const end = (id: string, toolName: string) => handlers.tool_execution_end?.({ toolCallId: id, toolName, isError: false }, ctx);
+    await start("a", "bash", { command: `cd ${root} && npm test -- conversation\nmore` });
+    await start("b", "read", { path: join(root, "src/core/conversation.ts") });
+    await start("n", "read", { path: "nested.ts" }, { parentToolCallId: "b" });
+    await start("q", "ask_question", { questions: [] });
+    await read();
+    await end("b", "read");
+    await end("a", "bash");
+    await read();
+    await start("c", "edit", { path: "x.ts" });
+    await handlers.agent_end?.({ messages: [] }, ctx);
+    await read();
+  });
+  const [running, ended, cleared] = snapshots;
+  assert.equal(running!.activity.current.tool, "read");
+  assert.equal(running!.activity.current.detail, "src/core/conversation.ts");
+  assert.deepEqual(running!.activity.recent.map((action: any) => action.detail), ["true"]);
+  assert.deepEqual(ended!.activity.recent.map((action: any) => [action.tool, action.detail]), [["bash", "npm test -- conversation"], ["read", "src/core/conversation.ts"], ["bash", "true"]]);
+  assert.equal(ended!.activity.current, undefined);
+  // An interrupted turn leaves no call running.
+  assert.equal(cleared!.activity.current, undefined);
+  assert.equal(cleared!.activity.recent.length, 3);
+});
+
+test("a child not mirrored to Hub never reads its branch for heartbeats", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-tmux-child-unmirrored-"));
+  let reads = 0;
+  await withChildEnv(root, join(root, "jobs", "child-1", "result.md"), async () => {
+    const handlers = loadBootstrapHandlers();
+    const ctx = { cwd: root, isIdle: () => true, sessionManager: { getBranch: () => { reads += 1; return []; } } };
+    await handlers.session_start?.({ type: "session_start" } as any, ctx);
+    await handlers.agent_start?.({}, ctx);
+    await handlers.session_shutdown?.({ type: "session_shutdown" } as any, ctx);
+  });
+  assert.equal(reads, 0);
+});
+
 async function writeJobRegistry(
   root: string,
   policy: { autoStopOnComplete: boolean; idleTimeoutMs?: number; accountingVersion?: 1; executionId?: string },

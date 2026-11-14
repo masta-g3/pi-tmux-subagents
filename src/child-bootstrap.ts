@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { ACTIVITY_RECENT_MAX, hubAction, hubWorkflowFields, loggedTool, type HubAction } from "./hub-workflow.js";
 import { heartbeatPath, turnResultPath, turnsPath } from "./paths.js";
 import { hasOpenDescendants, finalizeStoppedSubagents } from "./run.js";
 import { loadJobs, saveJobs, withStateLock } from "./state.js";
@@ -186,6 +187,9 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
   let closing = false;
   // An Esc interrupt stays an error for the parent's wait, but Hub shows it like an interrupted parent session.
   let interrupted = false;
+  // The child's tool calls for Hub's NOW and LOG fields: in progress by call ID, and the latest finished ones.
+  const runningActions = new Map<string, HubAction>();
+  let recentActions: HubAction[] = [];
 
   async function withCurrentExecution<T>(fn: (job: TmuxSubagentJob) => Promise<T>): Promise<T> {
     return withStateLock(stateRoot, async () => {
@@ -249,23 +253,36 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
       idleSince,
     };
     const hubData = interrupted && state === "error" ? { ...data, state: "waiting" as const, message: undefined } : data;
+    const hubDir = process.env.PI_AGENT_HUB_DIR;
+    const hubSessionId = process.env.PI_AGENT_HUB_SESSION_ID;
+    const hubFields = hubDir && hubSessionId ? hubActivityFields(ctx) : {};
     const publish = () => withCurrentExecution(async () => {
       await writeJson(heartbeatPath(stateRoot, jobId), data);
-      if (process.env.PI_AGENT_HUB_DIR && process.env.PI_AGENT_HUB_SESSION_ID) {
-        await writeJson(join(process.env.PI_AGENT_HUB_DIR, "heartbeats", `${process.env.PI_AGENT_HUB_SESSION_ID}.json`), {
+      if (hubDir && hubSessionId) {
+        await writeJson(join(hubDir, "heartbeats", `${hubSessionId}.json`), {
           ...hubData,
-          managedSessionId: process.env.PI_AGENT_HUB_SESSION_ID,
+          managedSessionId: hubSessionId,
           kind: process.env.PI_AGENT_HUB_KIND,
           parentId: process.env.PI_AGENT_HUB_PARENT_ID,
           agentName: process.env.PI_SUBAGENT_DISPLAY_NAME ?? process.env.PI_SUBAGENT_AGENT,
           agentType: process.env.PI_SUBAGENT_AGENT,
           taskPreview: process.env.PI_SUBAGENT_TASK_PREVIEW,
           resultPath: process.env.PI_SUBAGENT_RESULT_PATH,
+          ...hubFields,
         });
       }
     });
     heartbeatQueue = heartbeatQueue.then(publish, publish);
     return heartbeatQueue;
+  }
+
+  // What the child is working on, for Hub only: its workflow lens and tool calls, published on the next heartbeat.
+  function hubActivityFields(ctx: PiContext): Record<string, unknown> {
+    const current = [...runningActions.values()].at(-1);
+    const activity = current || recentActions.length ? { ...(current ? { current } : {}), ...(recentActions.length ? { recent: recentActions } : {}) } : undefined;
+    let branch: unknown[] | undefined;
+    try { branch = ctx.sessionManager?.getBranch?.(); } catch { branch = undefined; }
+    return { ...hubWorkflowFields(branch), ...(activity ? { activity } : {}) };
   }
 
   pi.on("session_start", async (event, ctx) => {
@@ -391,8 +408,22 @@ export default function tmuxSubagentChildBootstrap(pi: ExtensionAPI) {
     attention = undefined;
     await heartbeat(currentState, ctx as PiContext);
   });
+  // Tool calls only update memory; the periodic heartbeat publishes them, so tool events never wait on the jobs lock.
+  pi.on("tool_execution_start", (event, ctx) => {
+    // Newer Pi marks calls made by another tool; older SDK types do not declare the field.
+    if (!loggedTool(event.toolName, (event as { parentToolCallId?: unknown }).parentToolCallId)) return;
+    runningActions.set(event.toolCallId, hubAction(event.toolName, event.args, ctx.cwd));
+  });
+  pi.on("tool_execution_end", (event) => {
+    const action = runningActions.get(event.toolCallId);
+    if (!action) return;
+    runningActions.delete(event.toolCallId);
+    recentActions = [action, ...recentActions].slice(0, ACTIVITY_RECENT_MAX);
+  });
   pi.on("agent_end", (event) => {
     pendingMessages = event.messages;
+    // An interrupted turn leaves no call running.
+    runningActions.clear();
   });
   pi.on("agent_settled", async (_event, ctx) => {
     if (!ctx.isIdle() || !pendingMessages) return;
