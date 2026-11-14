@@ -191,6 +191,13 @@ State is stored in `PI_TMUX_SUBAGENTS_DIR`, or `<PI_CODING_AGENT_DIR>/pi-tmux-su
 
 The extension is standalone. When launched from a managed `pi-agent-hub` parent with `PI_AGENT_HUB_DIR` and `PI_AGENT_HUB_SESSION_ID`, it mirrors child rows into the hub registry and writes dashboard-compatible heartbeats. Without those env vars, no hub state is created or required.
 
+The hub heartbeat also carries what the child is working on, in Hub's producer-neutral fields:
+
+- `workflow` and `lens` come from the latest `workflow-runtime` entry in the child's own Pi session, such as a `ticket-runner` running a Rules workflow skill. A positioned entry becomes `workflow` (`steps`, `activeIndex`, `updatedAt`, and optional `ticketId`, `currentStepComplete`, `activity`, `lens`, `activeMode`); an entry without `activeStep` becomes a top-level `lens`. Producer-private run state is never copied.
+- `activity` lists the child's tool calls: the one in progress and up to six finished ones, each a tool name and one short argument, never output. Questions, handoffs and calls made by other tools are not logged. Tool events only update memory; the next heartbeat (every 2 s or on a lifecycle change) publishes them. A child not mirrored to Hub computes none of these fields.
+
+The internal job heartbeat does not carry these fields.
+
 ## Development
 
 ```bash

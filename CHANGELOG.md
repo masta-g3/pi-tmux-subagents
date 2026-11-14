@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Agent Hub heartbeats carry the child's workflow position, step lens and tool calls, so Hub can show what a workflow subagent is doing.
+
 ## 0.2.0 - 2026-08-05
 
 - Replace overlapping summary/details/peek modes with one ambient process widget and one live `/subagents` manager.
